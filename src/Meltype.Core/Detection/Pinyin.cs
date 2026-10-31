@@ -58,6 +58,17 @@ public static class Pinyin
         return false;
     }
 
+    /// <summary>
+    /// The Chinese quotes (“ ‘) the last line before the caret leaves open, so the next " or ' typed after Chinese closes them.
+    /// Japanese input types ” and ’ for both sides, so only an opening quote typed as Chinese counts.
+    /// </summary>
+    public static string OpenQuotes(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        var line = text[(text.LastIndexOf('\n') + 1)..];
+        return (line.LastIndexOf('“') > line.LastIndexOf('”') ? "“" : "") + (line.LastIndexOf('‘') > line.LastIndexOf('’') ? "‘" : "");
+    }
+
     private sealed record Tables(Dictionary<string, SyllableTier> Syllables, HashSet<string> Prefixes, Dictionary<string, SyllableTier> Words, HashSet<char> Simplified);
 
     private static readonly Lazy<Tables> Data = new(() =>

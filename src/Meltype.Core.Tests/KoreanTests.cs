@@ -50,6 +50,22 @@ internal static class KoreanTests
     }
 
     [Test]
+    public static void Korean_PunctuationStaysAscii()
+    {
+        // Like after English, Korean keeps ASCII punctuation: in the composition, after committed Hangul, and after Hangul before the caret
+        var k = new CompositionTests.Keyboard();
+        k.Type("dkssud,dkssud.");
+        Assert.Equal("안녕,안녕.", k.Showing);
+        k = new CompositionTests.Keyboard();
+        k.Type("dkssud\n,");
+        Assert.Equal(",", k.Showing);
+        k = new CompositionTests.Keyboard();
+        k.Host.PrecedingText = "안녕";
+        k.Type(".");
+        Assert.Equal(".", k.Showing);
+    }
+
+    [Test]
     public static void Korean_FollowsEnglishWordAsParticle()
     {
         var k = new CompositionTests.Keyboard();

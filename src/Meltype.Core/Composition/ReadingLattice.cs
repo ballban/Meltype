@@ -148,7 +148,7 @@ public sealed partial class CompositionDetector
 
     private List<CompositionSegment> FindSpansByReading(IReadOnlyList<CompositionUnit> units, string pending, bool? precedingEnglish, bool? followingEnglish,
         DetectionLevel level, bool englishSentence, bool kanaInput, double extraEnglishBias = 0, bool korean = false, bool precedingKorean = false,
-        bool chinese = false, bool precedingChinese = false)
+        bool chinese = false, bool precedingChinese = false, string precedingOpenQuotes = "")
     {
         var text = _preparedRaw + pending;
         var length = text.Length;
@@ -391,7 +391,7 @@ public sealed partial class CompositionDetector
         var edges = new List<LatticeEdge>();
         for (var node = chosen; node?.Previous is not null; node = node.Previous) edges.Add(node.Edge);
         edges.Reverse();
-        return ToSegments(units, text, unitAt, unitsEnd, edges);
+        return ToSegments(units, text, unitAt, unitsEnd, edges, chinese && precedingChinese, precedingOpenQuotes);
     }
 
     /// <summary>名詞に付く付属語か (が・を・に・で・する …)。英単語との切り替えの重みを 0 にする。</summary>
@@ -731,12 +731,15 @@ public sealed partial class CompositionDetector
     /// </summary>
     private bool IsLatticeSpellWord(string lower) => IsSpellWord(lower) && Detection.BuiltInWordChecker.Shared.IsWord(lower);
 
-    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。Korean or Chinese edges in a row become one segment.</summary>
-    private List<CompositionSegment> ToSegments(IReadOnlyList<CompositionUnit> units, string text, int[] unitAt, int unitsEnd, List<LatticeEdge> edges)
+    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。Korean or Chinese edges in a row become one segment.
+    /// Symbols typed in Chinese become Chinese punctuation segments, kept apart from Japanese ones.</summary>
+    private List<CompositionSegment> ToSegments(IReadOnlyList<CompositionUnit> units, string text, int[] unitAt, int unitsEnd, List<LatticeEdge> edges,
+        bool precedingChinese, string precedingOpenQuotes)
     {
         var segments = new List<CompositionSegment>();
-        foreach (var edge in edges)
+        for (var i = 0; i < edges.Count; i++)
         {
+            var edge = edges[i];
             var raw = text[edge.Start..edge.End];
             if (edge.Korean)
             {
@@ -752,12 +755,72 @@ public sealed partial class CompositionDetector
                 else segments.Add(new CompositionSegment(true, raw, raw) { IsChinese = true });
                 continue;
             }
+            if (edge.Neutral && ChinesePunctuation(text, edges, i, precedingChinese, precedingOpenQuotes) is { } punctuation)
+            {
+                if (segments.Count > 0 && segments[^1].IsChinesePunctuation)
+                    segments[^1] = segments[^1] with { Kana = segments[^1].Kana + punctuation, Raw = segments[^1].Raw + raw };
+                else segments.Add(new CompositionSegment(false, punctuation, raw) { IsChinesePunctuation = true });
+                continue;
+            }
             var kana = edge.English ? "" : EdgeKana(units, text, unitAt, unitsEnd, edge);
-            if (segments.Count > 0 && !edge.English && !segments[^1].IsEnglish)
+            if (segments.Count > 0 && !edge.English && !segments[^1].IsEnglish && !segments[^1].IsChinesePunctuation)
                 segments[^1] = segments[^1] with { Kana = segments[^1].Kana + kana, Raw = segments[^1].Raw + raw };
             else segments.Add(new CompositionSegment(edge.English, kana, raw));
         }
         return segments.Count > 0 ? segments : [new CompositionSegment(false, "", text)];
+    }
+
+    /// <summary>
+    /// The Chinese punctuation a symbol edge types (, → ，, [ → 【, ^ → ……, the keys of Microsoft Pinyin), or null when the symbol is not typed in Chinese
+    /// or keeps its form there: separators inside numbers (1,000・3.14・3:00), an apostrophe between letters (xi'an), and keys like - / @ #.
+    /// A symbol is Chinese after Chinese (你好，); an opening one is Chinese before Chinese ((nihao) → （你好）).
+    /// </summary>
+    private static string? ChinesePunctuation(string text, List<LatticeEdge> edges, int index, bool precedingChinese, string precedingOpenQuotes)
+    {
+        var edge = edges[index];
+        if (edge.End - edge.Start != 1) return null;
+        var c = text[edge.Start];
+        var before = edge.Start > 0 ? text[edge.Start - 1] : '\0';
+        var after = edge.End < text.Length ? text[edge.End] : '\0';
+        // " and ' alternate between opening and closing, counting the quote the text before the caret leaves open
+        var closes = c is '"' or '\'' && (text.AsSpan(0, edge.Start).Count(c) + (precedingOpenQuotes.Contains(c == '"' ? '“' : '‘') ? 1 : 0)) % 2 == 1;
+        var opener = c is '(' or '[' or '<' || c is '"' or '\'' && !closes;
+        if (!IsChineseAt(edges, index, opener, precedingChinese)) return null;
+        return c switch
+        {
+            ',' => edge.Kana != "," ? "，" : null,
+            '.' => edge.Kana != "." ? "。" : null,
+            '?' => "？",
+            '!' => "！",
+            ':' => char.IsAsciiDigit(before) ? null : "：",
+            ';' => "；",
+            '(' => "（",
+            ')' => "）",
+            '<' => "《",
+            '>' => "》",
+            '[' => "【",
+            ']' => "】",
+            '\\' => "、",
+            '^' => "……",
+            '_' => "——",
+            '$' => "￥",
+            '"' => closes ? "”" : "“",
+            '\'' => char.IsAsciiLetter(before) && char.IsAsciiLetter(after) ? null : closes ? "’" : "‘",
+            _ => null,
+        };
+    }
+
+    /// <summary>Whether the language next to a symbol edge is Chinese: the one before it, or for an opening symbol the one after it if any.</summary>
+    private static bool IsChineseAt(List<LatticeEdge> edges, int index, bool opener, bool precedingChinese)
+    {
+        if (opener)
+        {
+            for (var k = index + 1; k < edges.Count; k++)
+                if (!edges[k].Neutral) return edges[k].Chinese;
+        }
+        for (var k = index - 1; k >= 0; k--)
+            if (!edges[k].Neutral) return edges[k].Chinese;
+        return precedingChinese;
     }
 
     /// <summary>

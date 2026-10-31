@@ -130,8 +130,10 @@ public sealed partial class CompositionDetector
     /// 日本語の文の中の英単語 (GitHub の) より強い英語の根拠として扱う。</param>
     /// <param name="precedingKorean">The committed text before the caret ends with Hangul, so keys romaji can also read may be Korean.</param>
     /// <param name="precedingChinese">Chinese is being typed before the caret, so pinyin is read as Chinese first.</param>
+    /// <param name="precedingOpenQuotes">The Chinese quotes (“ ‘) the text before the caret leaves open, so a " or ' typed in Chinese closes them.</param>
     public IReadOnlyList<CompositionSegment> Segment(IReadOnlyList<CompositionUnit> units, string pending, bool? precedingEnglish = null, bool? followingEnglish = null,
-        DetectionLevel level = DetectionLevel.Balanced, bool englishSentence = false, bool kanaInput = false, bool precedingKorean = false, bool precedingChinese = false)
+        DetectionLevel level = DetectionLevel.Balanced, bool englishSentence = false, bool kanaInput = false, bool precedingKorean = false, bool precedingChinese = false,
+        string precedingOpenQuotes = "")
     {
         // 区間分けは units[i..j] の生文字列・かなを何度も作る。1 回の Segment 呼び出しの間だけ、
         // 連結した原文と各位置のオフセットを使い回す (内容・順序は同じで、文字列を毎回連結しない)。
@@ -143,7 +145,7 @@ public sealed partial class CompositionDetector
             return [new CompositionSegment(true, "", token)];
         return FindSpansByReading(units, pending, precedingEnglish, followingEnglish, level, englishSentence && precedingEnglish == true, kanaInput,
             korean: KoreanInput && !kanaInput && level != DetectionLevel.Manual, precedingKorean: precedingKorean,
-            chinese: ChineseInput && !kanaInput && level != DetectionLevel.Manual, precedingChinese: precedingChinese);
+            chinese: ChineseInput && !kanaInput && level != DetectionLevel.Manual, precedingChinese: precedingChinese, precedingOpenQuotes: precedingOpenQuotes);
     }
 
     /// <summary>Whether Dubeolsik keys typed in the romaji layout may be read as Korean.</summary>

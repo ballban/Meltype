@@ -19,6 +19,7 @@ internal static class ChineseTests
             ["danshi"] = ["但是", "单式"],
             ["hang"] = ["行", "航"],
             ["long"] = ["龙", "长"],
+            ["wohenhao"] = ["我很好"],
         };
 
         private readonly List<(string Pinyin, string Text)> _learned = [];
@@ -154,6 +155,65 @@ internal static class ChineseTests
         Assert.True(chinese.Learned().Contains(("danshi", "但是")), "the Chinese engine learns the choice");
         Assert.Equal(null, memory.Get("danshi"), "not taught as Japanese or English");
         Assert.Equal(null, history.Get("だんし"), "not in the Japanese conversion history");
+    });
+
+    [Test]
+    public static void Chinese_PunctuationFollowsChinese() => WithChinese(() =>
+    {
+        // Like ASCII punctuation after English, symbols typed after Chinese are Chinese punctuation, not the Japanese 、
+        var k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("nihao,wohenhao.");
+        Assert.Equal("nihao，wohenhao。", k.Showing);
+        k.Type(" \n");
+        Assert.Equal("你好，我很好。", k.Host.Document);
+
+        // After committed Chinese, and the punctuation keeps the Chinese context for the word after it
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("nihao \n,");
+        Assert.Equal("，", k.Showing);
+        k.Type("\nwomen ");
+        Assert.Equal("我们", k.Host.View?.Clauses?[0], "Document: " + k.Host.Document);
+
+        foreach (var number in new[] { "1,000", "3.14", "3:00" })
+        {
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Host.PrecedingText = "这是";
+            k.Type(number);
+            Assert.Equal(number, k.Showing, "a separator inside a number keeps its form");
+        }
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("kyouha,");
+        Assert.Equal("きょうは、", k.Showing, "Japanese keeps its punctuation");
+    });
+
+    [Test]
+    public static void Chinese_QuotesAndBracketsPairUp() => WithChinese(() =>
+    {
+        // The Japanese engine turns ” into “, so Chinese punctuation is committed without converting it
+        var k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("\"nihao\"");
+        Assert.Equal("“nihao”", k.Showing, "an opening quote follows the Chinese after it");
+        k.Type(" \n");
+        Assert.Equal("“你好”", k.Host.Document);
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("\"nihao \n\"");
+        Assert.Equal("”", k.Showing, "the quote opened in the last commit closes");
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Host.PrecedingText = "他说：“你好\n这是";
+        k.Type("\"");
+        Assert.Equal("“", k.Showing, "a quote left open on an earlier line does not count");
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("(nihao)");
+        Assert.Equal("（nihao）", k.Showing);
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Host.PrecedingText = "这是";
+        k.Type("[ ");
+        Assert.Equal("【", k.Host.View?.Clauses?[0], "a lone bracket offers the Chinese one first");
     });
 
     [Test]

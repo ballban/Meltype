@@ -408,6 +408,9 @@ public sealed class CompositionController
         /// <summary>A Chinese (pinyin) clause: Reading and Raw are the typed pinyin and the first candidate is the Chinese.</summary>
         public bool IsChinese { get; init; }
 
+        /// <summary>Symbols typed in Chinese (，【): Reading is the Chinese form and Kana the Japanese one. Never converted, split or learned.</summary>
+        public bool IsChinesePunctuation { get; init; }
+
         /// <summary>Candidates from the Chinese converter, in Chinese clauses and in Japanese or English clauses whose letters are pinyin.</summary>
         public HashSet<string> ChineseCandidates { get; } = new(StringComparer.Ordinal);
 
@@ -1104,12 +1107,20 @@ public sealed class CompositionController
                 PrecedingEnglishSentence = englishWords >= 2,
                 PrecedingKorean = korean,
                 PrecedingChinese = chinese,
+                PrecedingOpenQuotes = Pinyin.OpenQuotes(output.ToString()),
                 Punctuation = _options.Punctuation(),
             };
             foreach (var c in word) typed.Append(c);
             var segments = typed.Segments();
             foreach (var segment in segments)
             {
+                if (segment.IsChinesePunctuation)
+                {
+                    if (kana.Length > 0) output.Append(Convert(kana.ToString()));
+                    kana.Clear();
+                    output.Append(segment.Kana);
+                    continue;
+                }
                 if (!segment.IsEnglish)
                 {
                     kana.Append(segment.Kana);
@@ -1128,7 +1139,7 @@ public sealed class CompositionController
                 output.Append(segment.Shown).Append(' ');
             }
             korean = segments.Count > 0 && segments[^1].IsKorean;
-            chinese = segments.Count > 0 && segments[^1].IsChinese;
+            chinese = typed.EndsWithChinese();
             englishWords = segments.Count > 0 && segments[^1].IsEnglish && !korean && !chinese ? (segments.Count == 1 ? englishWords + 1 : 1) : 0;
         }
         if (kana.Length > 0) output.Append(Convert(kana.ToString()));
@@ -1162,6 +1173,7 @@ public sealed class CompositionController
         _precedingText = _lastCommitEnglish is null ? null : _lastCommitText;
         _text.PrecedingKorean = Dubeolsik.EndsWithHangul(_precedingText);
         _text.PrecedingChinese = _detector.ChineseInput && (_lastCommitChinese || Pinyin.EndsWithChinese(_precedingText));
+        _text.PrecedingOpenQuotes = Pinyin.OpenQuotes(_precedingText);
         UpdateWideContext();
         _followingText = null;
         _caretBefore = null; // 読み直せなければ (返ってこなければ) キャレットの位置は確かめない = 今までどおり直す
@@ -1182,6 +1194,7 @@ public sealed class CompositionController
                 _text.PrecedingKorean = Dubeolsik.EndsWithHangul(before);
                 _text.PrecedingChinese = _detector.ChineseInput && (Pinyin.EndsWithChinese(before) ||
                     _lastCommitChinese && _lastCommitText is { Length: > 0 } last && before.TrimEnd().EndsWith(last.TrimEnd(), StringComparison.Ordinal));
+                _text.PrecedingOpenQuotes = Pinyin.OpenQuotes(before);
                 UpdateWideContext();
                 if (LanguageOf(before) is { } english) _text.PrecedingEnglish = english;
                 UpdateLearningContext();
@@ -1728,6 +1741,14 @@ public sealed class CompositionController
                 clauses.Add(chineseClause);
                 continue;
             }
+            if (segment.IsChinesePunctuation)
+            {
+                // Kept out of the Japanese engine, which turns Chinese punctuation into Japanese (” → “)
+                var japaneseForm = _text.KanaForSegment(s) ?? segment.Kana;
+                clauses.Add(new Clause(segment.Kana, false, Distinct([segment.Kana, japaneseForm, segment.Raw]))
+                { Raw = segment.Raw, Kana = japaneseForm, Expanded = true, IsChinesePunctuation = true });
+                continue;
+            }
             if (segment.IsEnglish)
             {
                 if (segment.IsProtected && !preferJapanese)
@@ -1792,6 +1813,8 @@ public sealed class CompositionController
     {
         if (_options.DirectMode() || _text.Mode is DisplayMode.HalfWidthAlphanumeric or DisplayMode.FullWidthAlphanumeric ||
             _text.Pending.Length > 0 || _text.Units.Count is not (1 or 2) || _text.ProtectedSpans().Count > 0) return null;
+        // Brackets typed in Chinese ([ → 【) start from the Chinese form
+        if (_text.Segments().All(s => s.IsChinesePunctuation)) return string.Concat(_text.Segments().Select(s => s.Kana));
         return string.Concat(_text.Units.Select(u => !_text.KanaInput && u.Raw is "{" or "}" or "<" or ">" ? u.Raw : u.Kana));
     }
 
@@ -2639,12 +2662,14 @@ public sealed class CompositionController
     {
         var current = _clauses[_selectedClause];
         // 空のペアは左右を一度に選択・確定する単位。区切り操作で片側の文節へ戻さない。
-        if (current.Brackets is not null) return;
+        if (current.Brackets is not null || current.IsChinesePunctuation) return;
         var next = _selectedClause + 1 < _clauses.Count ? _clauses[_selectedClause + 1] : null;
         // 区切りを動かせないときは、英語の文節を読み直さずにそのままにする
         if (current.IsEnglish && !CanReadAsJapanese(current)) return;
-        if (delta > 0 && (next is null || next.IsEnglish && !CanReadAsJapanese(next))) return;
+        if (delta > 0 && (next is null || next.IsChinesePunctuation || next.IsEnglish && !CanReadAsJapanese(next))) return;
         if (delta < 0 && (current.IsEnglish ? current.Kana! : current.Reading).Length <= 1) return;
+        // Chinese punctuation stays as it is: what the clause gives up becomes a new clause before it
+        if (next is { IsChinesePunctuation: true }) next = null;
 
         if (current.IsEnglish)
         {
@@ -2687,15 +2712,15 @@ public sealed class CompositionController
     /// <summary>
     /// 文節の区切りを動かすと Reconvert が Raw を消すので、文節ごとの打った英字を取り直す (F9 / F10 が選んだ文節だけに効くのに要る)。
     /// 英語の文節は Kana (打った英字をローマ字として読んだかな) の長さ分、日本語の文節は Reading の長さ分を、文全体のかなの上で数える。
-    /// 英語の文節に Kana が無い (保護区間など) ときは位置が決まらないので、取り直さない。
+    /// 英語の文節に Kana が無い (保護区間など) ときは位置が決まらないので、取り直さない。Chinese punctuation counts its Japanese form and keeps its Raw.
     /// </summary>
     private void RestoreRaw()
     {
         if (_clauses.Any(c => c.IsEnglish && c.Kana is null)) return;
-        var raws = _text.RawForKanas([.. _clauses.Select(c => c.IsEnglish ? c.Kana! : c.Reading)]);
+        var raws = _text.RawForKanas([.. _clauses.Select(c => c.IsEnglish || c.IsChinesePunctuation ? c.Kana! : c.Reading)]);
         for (var i = 0; i < _clauses.Count; i++)
         {
-            if (!_clauses[i].IsEnglish) _clauses[i].Raw = raws[i];
+            if (!_clauses[i].IsEnglish && !_clauses[i].IsChinesePunctuation) _clauses[i].Raw = raws[i];
         }
     }
 
@@ -2807,8 +2832,10 @@ public sealed class CompositionController
         }
         if (fixEnglish && !converting && _text.Mode == DisplayMode.Auto) text = FixEnglishTypo(text);
         var english = converting ? _clauses.All(c => c.IsEnglish && !c.ChoseChinese) : _text.IsAlphanumericAt(final: true);
-        // Ending with Chinese makes the next word read Chinese first (women → 我们 after 你好)
-        var chinese = converting ? _clauses[^1].ChoseChinese : EndsWithChinese();
+        // Ending with Chinese makes the next word read Chinese first (women → 我们 after 你好). Chinese punctuation after it (你好，) keeps that
+        var chinese = converting
+            ? _clauses.LastOrDefault(c => !c.IsChinesePunctuation) is { } lastWord ? lastWord.ChoseChinese : _text.PrecedingChinese
+            : EndsWithChinese();
         // F6〜F10 で、はっきり英字 / かなを選んで確定した語も、後から確定し直さない。
         var chosen = converting ? _clauses.Any(c => c.Changed) : _text.Mode != DisplayMode.Auto;
         if (_reconversion is { } selection)
@@ -3038,7 +3065,7 @@ public sealed class CompositionController
         // 設定「ユーザー学習を使う」が OFF なら、新しく覚えない (issue #277)
         if (!_options.Learning()) return;
         // 変換の候補から打ったままの英字 (api) を選んで確定したら、その語は次から英字にする (F10 と同じ)。
-        foreach (var clause in _clauses.Where(c => !c.IsEnglish && c.Changed && c.Raw is { } raw && c.Text == raw))
+        foreach (var clause in _clauses.Where(c => !c.IsEnglish && !c.IsChinesePunctuation && c.Changed && c.Raw is { } raw && c.Text == raw))
         {
             _options.Languages?.Remember(clause.Raw!, english: true);
         }
@@ -3077,7 +3104,7 @@ public sealed class CompositionController
             if (clause.Text == clause.Reading || clause.Text == CompositionText.ToKatakana(clause.Reading) || clause.Text == clause.Raw) continue;
             // 英訳は上で英訳の記録に入れた (ここで覚えると次から 1 番目に出てしまう)。
             if (clause.Translations.Contains(clause.Text)) continue;
-            if (clause.ChoseChinese) continue;
+            if (clause.ChoseChinese || clause.IsChinesePunctuation) continue;
             if (IsDateTimeChoice(clause) || IsMathSymbolChoice(clause)) continue;
             history.Remember(clause.Reading, clause.Text);
         }
@@ -3101,7 +3128,7 @@ public sealed class CompositionController
         }
         foreach (var clause in _clauses)
         {
-            if (clause.IsEnglish || clause.ChoseChinese || clause.Text == clause.Raw || clause.Translations.Contains(clause.Text) || clause.Reading.Any(char.IsAsciiLetterOrDigit) || IsDateTimeChoice(clause) || IsMathSymbolChoice(clause))
+            if (clause.IsEnglish || clause.ChoseChinese || clause.IsChinesePunctuation || clause.Text == clause.Raw || clause.Translations.Contains(clause.Text) || clause.Reading.Any(char.IsAsciiLetterOrDigit) || IsDateTimeChoice(clause) || IsMathSymbolChoice(clause))
             {
                 Flush();
                 continue;
@@ -3221,7 +3248,7 @@ public sealed class CompositionController
     private bool EndsWithEnglish() =>
         _text.Mode == DisplayMode.Auto && _text.Segments() is { Count: > 0 } segments && segments[^1].IsEnglish && !segments[^1].IsChinese;
 
-    private bool EndsWithChinese() => _text.Mode == DisplayMode.Auto && _text.Segments() is [.., { IsChinese: true }];
+    private bool EndsWithChinese() => _text.EndsWithChinese();
 
     private void ReplayDown(KeyEvent e)
     {

@@ -22,12 +22,14 @@ public readonly record struct CompositionUnit(string Kana, string Raw);
 /// <remarks>
 /// A Korean segment is IsEnglish (kept out of kana conversion, one key per Backspace) with its Hangul in Kana.
 /// A Chinese segment is IsEnglish the same way with its pinyin in Kana; conversion turns it into hanzi.
+/// A Chinese punctuation segment holds symbols typed in Chinese (, → ，) with the Chinese form in Kana; it is shown and committed as it is.
 /// </remarks>
 public readonly record struct CompositionSegment(bool IsEnglish, string Kana, string Raw)
 {
     public bool IsProtected { get; init; }
     public bool IsKorean { get; init; }
     public bool IsChinese { get; init; }
+    public bool IsChinesePunctuation { get; init; }
 
     /// <summary>Not English, Japanese or a symbol: Korean or Chinese.</summary>
     public bool IsOtherLanguage => IsKorean || IsChinese;
@@ -456,7 +458,7 @@ public sealed class CompositionText
             .Append(PrecedingEnglish switch { true => 'E', false => 'J', null => '-' })
             .Append(FollowingEnglish switch { true => 'E', false => 'J', null => '-' })
             .Append(PrecedingEnglishSentence ? 'S' : '-').Append(KanaInput ? 'K' : '-').Append(PrecedingKorean ? 'H' : '-').Append(_detector.KoreanInput ? 'H' : '-')
-            .Append(PrecedingChinese ? 'Z' : '-').Append(_detector.ChineseInput ? 'Z' : '-')
+            .Append(PrecedingChinese ? 'Z' : '-').Append(_detector.ChineseInput ? 'Z' : '-').Append(PrecedingOpenQuotes).Append('\u0003')
             .Append(PrecedingEnglishName ? 'N' : '-').Append(FullWidthParentheses ? 'W' : '-').Append(LaughterAfterKana ? 'L' : '-')
             .Append((int)EffectiveLevel).Append(':').Append(_detector.Memory?.Version ?? -1);
         return key.ToString();
@@ -480,7 +482,7 @@ public sealed class CompositionText
     {
         var spans = ProtectedSpans();
         if (spans.Count == 0)
-            return _detector.Segment(units, Pending, PrecedingEnglish, FollowingEnglish, EffectiveLevel, PrecedingEnglishSentence, KanaInput, PrecedingKorean, PrecedingChinese);
+            return _detector.Segment(units, Pending, PrecedingEnglish, FollowingEnglish, EffectiveLevel, PrecedingEnglishSentence, KanaInput, PrecedingKorean, PrecedingChinese, PrecedingOpenQuotes);
         var raw = Raw;
         var result = new List<CompositionSegment>();
         var start = 0;
@@ -499,7 +501,7 @@ public sealed class CompositionText
             var gapUnits = UnitsInRawRange(units, from, to, out var pending);
             var segments = _detector.Segment(gapUnits, pending, from == 0 ? PrecedingEnglish : false,
                 to == raw.Length ? FollowingEnglish : false, EffectiveLevel,
-                from == 0 && PrecedingEnglishSentence, KanaInput, from == 0 && PrecedingKorean, from == 0 && PrecedingChinese);
+                from == 0 && PrecedingEnglishSentence, KanaInput, from == 0 && PrecedingKorean, from == 0 && PrecedingChinese, from == 0 ? PrecedingOpenQuotes : "");
             // 内部の区切りの子音は後の保護文字列とは結合しない。末尾の Pending は表示側が扱う。
             if (to < raw.Length && pending.Length > 0 && !segments[^1].IsEnglish)
                 segments = [.. segments.Take(segments.Count - 1), segments[^1] with
@@ -550,9 +552,9 @@ public sealed class CompositionText
     private List<CompositionUnit>? HalfWidthOpeners(IReadOnlyList<CompositionSegment> segments)
     {
         if (KanaInput || !_units.Any(u => Openers.ContainsKey(u.Raw) && u.Kana != u.Raw)) return null;
-        // 打った英字の 1 文字ずつが英語の区間か
+        // 打った英字の 1 文字ずつが英語の区間か (Chinese is not: its quotes and brackets are Chinese, “你好”)
         var english = new List<bool>();
-        foreach (var segment in segments) foreach (var _ in segment.Raw) english.Add(segment.IsEnglish);
+        foreach (var segment in segments) foreach (var _ in segment.Raw) english.Add(segment.IsEnglish && !segment.IsChinese);
         var offsets = new int[_units.Count];
         for (int i = 0, offset = 0; i < _units.Count; offset += _units[i].Raw.Length, i++) offsets[i] = offset;
         bool IsHalf(int i) => _units[i].Kana == _units[i].Raw || (offsets[i] < english.Count && english[offsets[i]]);
@@ -588,7 +590,7 @@ public sealed class CompositionText
     public string? Suggestion()
     {
         if (Mode != DisplayMode.Auto || EffectiveLevel != DetectionLevel.Manual || IsNumeric) return null;
-        var suggested = _detector.Segment(_units, Pending, PrecedingEnglish, FollowingEnglish, DetectionLevel.Balanced, PrecedingEnglishSentence, KanaInput, PrecedingKorean, PrecedingChinese);
+        var suggested = _detector.Segment(_units, Pending, PrecedingEnglish, FollowingEnglish, DetectionLevel.Balanced, PrecedingEnglishSentence, KanaInput, PrecedingKorean, PrecedingChinese, PrecedingOpenQuotes);
         // Manual detection never reads Korean or Chinese, so only English is suggested
         if (!suggested.Any(s => s.IsEnglish && !s.IsOtherLanguage) || suggested.SequenceEqual(Segments())) return null;
         return string.Join(" ", suggested.Where(s => s.IsEnglish && !s.IsOtherLanguage).Select(s => s.Raw));
@@ -613,11 +615,24 @@ public sealed class CompositionText
     /// <summary>Chinese is being typed before the caret (这是 or Meltype's last commit): pinyin is read as Chinese first.</summary>
     public bool PrecedingChinese { get; set; }
 
+    /// <summary>The Chinese quotes (“ ‘) the text before the caret leaves open: a " or ' typed in Chinese closes them (”).</summary>
+    public string PrecedingOpenQuotes { get; set; } = "";
+
+    /// <summary>The composition ends in Chinese, not counting the Chinese punctuation after it (你好，); with nothing else, whether Chinese comes before it.</summary>
+    public bool EndsWithChinese()
+    {
+        if (Mode != DisplayMode.Auto) return false;
+        var segments = Segments();
+        for (var i = segments.Count - 1; i >= 0; i--)
+            if (!segments[i].IsChinesePunctuation) return segments[i].IsChinese;
+        return PrecedingChinese && segments.Count > 0;
+    }
+
     /// <summary>変換用の区間分け。末尾の入力途中の子音は確定扱い (n → ん) にして日本語区間の読みに含める。</summary>
     public IReadOnlyList<CompositionSegment> ConversionSegments()
     {
         var segments = Segments().ToList();
-        if (segments.Count > 0 && !segments[^1].IsEnglish)
+        if (segments.Count > 0 && !segments[^1].IsEnglish && !segments[^1].IsChinesePunctuation)
         {
             segments[^1] = segments[^1] with { Kana = segments[^1].Kana + PendingText(final: true) };
         }
@@ -804,6 +819,11 @@ public sealed class CompositionText
             if (segment.IsEnglish)
             {
                 builder.Append(segment.Shown);
+                continue;
+            }
+            if (segment.IsChinesePunctuation)
+            {
+                builder.Append(segment.Kana);
                 continue;
             }
             var isLast = i == segments.Count - 1;
