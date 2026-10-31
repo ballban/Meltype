@@ -59,6 +59,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         var detector = Composition.CompositionDetector.CreateDefault(AppPaths.UserDictionaryDirectory);
         detector.SpellChecker = Detection.WindowsSpellChecker.Shared;
         detector.UseJapanesePunctuationAfterEnglish = () => _engine.Settings.JapanesePunctuationAfterEnglish;
+        detector.UseHalfWidthChinesePunctuation = () => _engine.Settings.ChinesePunctuation == ChinesePunctuationStyle.HalfWidth;
         _composition = new Composition.CompositionService(_invoker, detector, new Composition.CompositionOptions
         {
             LiveConversion = () => _engine.AppSettings.LiveConversion,

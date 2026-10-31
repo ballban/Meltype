@@ -458,7 +458,8 @@ public sealed class CompositionText
             .Append(PrecedingEnglish switch { true => 'E', false => 'J', null => '-' })
             .Append(FollowingEnglish switch { true => 'E', false => 'J', null => '-' })
             .Append(PrecedingEnglishSentence ? 'S' : '-').Append(KanaInput ? 'K' : '-').Append(PrecedingKorean ? 'H' : '-').Append(_detector.KoreanInput ? 'H' : '-')
-            .Append(PrecedingChinese ? 'Z' : '-').Append(_detector.ChineseInput ? 'Z' : '-').Append(PrecedingOpenQuotes).Append('\u0003')
+            .Append(PrecedingChinese ? 'Z' : '-').Append(_detector.ChineseInput ? 'Z' : '-').Append(_detector.UseHalfWidthChinesePunctuation?.Invoke() == true ? 'h' : '-')
+            .Append(PrecedingOpenQuotes).Append('\u0003')
             .Append(PrecedingEnglishName ? 'N' : '-').Append(FullWidthParentheses ? 'W' : '-').Append(LaughterAfterKana ? 'L' : '-')
             .Append((int)EffectiveLevel).Append(':').Append(_detector.Memory?.Version ?? -1);
         return key.ToString();

@@ -217,6 +217,50 @@ internal static class ChineseTests
     });
 
     [Test]
+    public static void Chinese_HalfWidthPunctuationKeepsSymbolsAsTyped() => WithChinese(() =>
+    {
+        var halfWidth = true;
+        CompositionTests.Detector.UseHalfWidthChinesePunctuation = () => halfWidth;
+        try
+        {
+            // The setting keeps the symbols as typed, still not the Japanese 、 。
+            var k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Type("nihao,wohenhao.");
+            Assert.Equal("nihao,wohenhao.", k.Showing);
+            k.Type(" \n");
+            Assert.Equal("你好,我很好.", k.Host.Document);
+
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Type("\"nihao\" \n");
+            Assert.Equal("\"你好\"", k.Host.Document);
+
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Type("nihao \n,");
+            Assert.Equal(",", k.Showing);
+            k.Type("\nwomen ");
+            Assert.Equal("我们", k.Host.View?.Clauses?[0], "the punctuation keeps the Chinese context. Document: " + k.Host.Document);
+
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Host.PrecedingText = "这是";
+            k.Type("[ ");
+            Assert.Equal("[", k.Host.View?.Clauses?[0], "a lone bracket offers the typed one first");
+
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Type("kyouha,");
+            Assert.Equal("きょうは、", k.Showing, "Japanese keeps its punctuation");
+
+            halfWidth = false;
+            k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+            k.Type("nihao,");
+            Assert.Equal("nihao，", k.Showing, "changing the setting applies to the next input");
+        }
+        finally
+        {
+            CompositionTests.Detector.UseHalfWidthChinesePunctuation = null;
+        }
+    });
+
+    [Test]
     public static void Chinese_OffKeepsJapaneseAndEnglish()
     {
         var k = new CompositionTests.Keyboard(chinese: new FakeChinese());

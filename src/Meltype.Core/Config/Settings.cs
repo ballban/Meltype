@@ -93,6 +93,15 @@ public enum PunctuationStyle
     [Description("、．")] ToutenFullWidthPeriod,
 }
 
+/// <summary>The symbols typed after Chinese (pinyin).</summary>
+public enum ChinesePunctuationStyle
+{
+    /// <summary>Default. Chinese punctuation (，。【】“”).</summary>
+    [Description("全角 (，。)")] FullWidth,
+    /// <summary>The symbols as typed (, . [ ").</summary>
+    [Description("半角 (, .)")] HalfWidth,
+}
+
 // config.json に数値で書いても読めるので、番号は前の版のまま (1 は消した IME 自動切替)。
 public enum InputMode
 {
@@ -349,6 +358,10 @@ public sealed class Settings
     [Category("1. 全般"), DisplayName("英字の後ろの , . も句読点にする"),
      Description("英字のすぐ後ろで打った , . も、日本語の句読点 (設定「句読点」の形) にします (IME, → IME、)。OFF だと、変換ボックスの中が英字だけなら半角の , . のままです (英文を打つとき)。ON でも、キャレットの前が英語 (Hello + world.) のときと、英単語の中の . (tetr.io) は半角のままです。")]
     public bool JapanesePunctuationAfterEnglish { get; set; }
+
+    [Category("1. 全般"), DisplayName("中国語の句読点・記号"),
+     Description("中国語 (ピンイン) の後ろで打った , . ? ! : ; ( ) [ ] < > \" ' などの記号の形です。全角は中国語の句読点 (，。？！：；（）【】《》“”) にし、半角は打ったまま (, . ? !) にします。どちらでも日本語の 、。 にはしません。数字の間の , . : (1,000・3.14・3:00) は半角のままです。中国語の入力が使えるときだけ効きます。")]
+    public ChinesePunctuationStyle ChinesePunctuation { get; set; } = ChinesePunctuationStyle.FullWidth;
 
     [Category("1. 全般"), DisplayName("ライブ変換"),
      Description("Keyboard モードで、Space を押さなくても打ったそばから漢字に変換して表示します。")]

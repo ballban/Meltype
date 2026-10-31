@@ -109,6 +109,9 @@ public sealed partial class CompositionDetector
     /// </summary>
     public Func<bool>? UseJapanesePunctuationAfterEnglish { get; set; }
 
+    /// <summary>Whether symbols typed after Chinese stay as typed (, .) instead of becoming Chinese punctuation (，。). Null means Chinese punctuation.</summary>
+    public Func<bool>? UseHalfWidthChinesePunctuation { get; set; }
+
     /// <summary>
     /// 英字の後ろの記号 units[i] を、英文の記号 (半角のまま) として扱うか。設定が ON でも、キャレットの前が英語なら英文の続き。
     /// すぐ後ろに英数字が続く . は、ドメイン・拡張子の区切り (tetr.io、MeltypeTip.dll)。

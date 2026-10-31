@@ -230,6 +230,7 @@ public sealed class MeltypeSession
         // OS のスペルチェッカーが無ければ (Linux)、同梱のよく使う英単語の一覧を使う (meeting を英語と分かるように)。
         detector.SpellChecker = wordChecker is { IsAvailable: true } ? wordChecker : Detection.BuiltInWordChecker.Shared;
         detector.UseJapanesePunctuationAfterEnglish = () => settings.JapanesePunctuationAfterEnglish;
+        detector.UseHalfWidthChinesePunctuation = () => settings.ChinesePunctuation == ChinesePunctuationStyle.HalfWidth;
         var options = shared.Options with
         {
             LiveConversion = () => settings.LiveConversion,

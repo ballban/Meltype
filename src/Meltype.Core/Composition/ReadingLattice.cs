@@ -737,6 +737,7 @@ public sealed partial class CompositionDetector
         bool precedingChinese, string precedingOpenQuotes)
     {
         var segments = new List<CompositionSegment>();
+        var halfWidthChinese = UseHalfWidthChinesePunctuation?.Invoke() == true;
         for (var i = 0; i < edges.Count; i++)
         {
             var edge = edges[i];
@@ -757,6 +758,8 @@ public sealed partial class CompositionDetector
             }
             if (edge.Neutral && ChinesePunctuation(text, edges, i, precedingChinese, precedingOpenQuotes) is { } punctuation)
             {
+                // Half-width still keeps the symbol out of the Japanese reading (, → 、)
+                if (halfWidthChinese) punctuation = raw;
                 if (segments.Count > 0 && segments[^1].IsChinesePunctuation)
                     segments[^1] = segments[^1] with { Kana = segments[^1].Kana + punctuation, Raw = segments[^1].Raw + raw };
                 else segments.Add(new CompositionSegment(false, punctuation, raw) { IsChinesePunctuation = true });
