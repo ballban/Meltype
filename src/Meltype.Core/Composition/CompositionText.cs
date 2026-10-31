@@ -19,9 +19,14 @@ public enum LetterCase { AsTyped, Upper, Capitalized }
 public readonly record struct CompositionUnit(string Kana, string Raw);
 
 /// <summary>表示上のひとまとまり。英語と判定した区間は英字のまま、それ以外は日本語 (かな/漢字)。</summary>
+/// <remarks>A Korean segment is IsEnglish (kept out of kana conversion, one key per Backspace) with its Hangul in Kana.</remarks>
 public readonly record struct CompositionSegment(bool IsEnglish, string Kana, string Raw)
 {
     public bool IsProtected { get; init; }
+    public bool IsKorean { get; init; }
+
+    /// <summary>What the segment shows when it is not Japanese: the Hangul of a Korean segment, otherwise the typed letters.</summary>
+    public string Shown => IsKorean ? Kana : Raw;
 }
 
 /// <summary>
@@ -419,7 +424,7 @@ public sealed class CompositionText
         for (var i = 0; i < segments.Count; i++)
         {
             var segment = segments[i];
-            if (segment.IsEnglish && segment.Raw.Length == 3 && segment.Raw[2] is 'w' && !(i > 0 ? segments[i - 1].IsEnglish : PrecedingEnglishSentence) &&
+            if (segment.IsEnglish && !segment.IsKorean && segment.Raw.Length == 3 && segment.Raw[2] is 'w' && !(i > 0 ? segments[i - 1].IsEnglish : PrecedingEnglishSentence) &&
                 char.IsAsciiLetterLower(segment.Raw[0]) && char.IsAsciiLetterLower(segment.Raw[1]) &&
                 _detector.Romaji.Analyze(segment.Raw[..2]) is { IsValid: true, Partial: "" } reading && reading.Kana.Length == 1)
             {
@@ -443,7 +448,7 @@ public sealed class CompositionText
         key.Append('\u0003').Append(_pending).Append('\u0003')
             .Append(PrecedingEnglish switch { true => 'E', false => 'J', null => '-' })
             .Append(FollowingEnglish switch { true => 'E', false => 'J', null => '-' })
-            .Append(PrecedingEnglishSentence ? 'S' : '-').Append(KanaInput ? 'K' : '-')
+            .Append(PrecedingEnglishSentence ? 'S' : '-').Append(KanaInput ? 'K' : '-').Append(PrecedingKorean ? 'H' : '-').Append(_detector.KoreanInput ? 'H' : '-')
             .Append(PrecedingEnglishName ? 'N' : '-').Append(FullWidthParentheses ? 'W' : '-').Append(LaughterAfterKana ? 'L' : '-')
             .Append((int)EffectiveLevel).Append(':').Append(_detector.Memory?.Version ?? -1);
         return key.ToString();
@@ -467,7 +472,7 @@ public sealed class CompositionText
     {
         var spans = ProtectedSpans();
         if (spans.Count == 0)
-            return _detector.Segment(units, Pending, PrecedingEnglish, FollowingEnglish, EffectiveLevel, PrecedingEnglishSentence, KanaInput);
+            return _detector.Segment(units, Pending, PrecedingEnglish, FollowingEnglish, EffectiveLevel, PrecedingEnglishSentence, KanaInput, PrecedingKorean);
         var raw = Raw;
         var result = new List<CompositionSegment>();
         var start = 0;
@@ -486,7 +491,7 @@ public sealed class CompositionText
             var gapUnits = UnitsInRawRange(units, from, to, out var pending);
             var segments = _detector.Segment(gapUnits, pending, from == 0 ? PrecedingEnglish : false,
                 to == raw.Length ? FollowingEnglish : false, EffectiveLevel,
-                from == 0 && PrecedingEnglishSentence, KanaInput);
+                from == 0 && PrecedingEnglishSentence, KanaInput, from == 0 && PrecedingKorean);
             // 内部の区切りの子音は後の保護文字列とは結合しない。末尾の Pending は表示側が扱う。
             if (to < raw.Length && pending.Length > 0 && !segments[^1].IsEnglish)
                 segments = [.. segments.Take(segments.Count - 1), segments[^1] with
@@ -575,9 +580,10 @@ public sealed class CompositionText
     public string? Suggestion()
     {
         if (Mode != DisplayMode.Auto || EffectiveLevel != DetectionLevel.Manual || IsNumeric) return null;
-        var suggested = _detector.Segment(_units, Pending, PrecedingEnglish, FollowingEnglish, DetectionLevel.Balanced, PrecedingEnglishSentence, KanaInput);
-        if (!suggested.Any(s => s.IsEnglish) || suggested.SequenceEqual(Segments())) return null;
-        return string.Join(" ", suggested.Where(s => s.IsEnglish).Select(s => s.Raw));
+        var suggested = _detector.Segment(_units, Pending, PrecedingEnglish, FollowingEnglish, DetectionLevel.Balanced, PrecedingEnglishSentence, KanaInput, PrecedingKorean);
+        // Manual detection never reads Korean, so only English is suggested
+        if (!suggested.Any(s => s.IsEnglish && !s.IsKorean) || suggested.SequenceEqual(Segments())) return null;
+        return string.Join(" ", suggested.Where(s => s.IsEnglish && !s.IsKorean).Select(s => s.Raw));
     }
 
     /// <summary>
@@ -592,6 +598,9 @@ public sealed class CompositionText
 
     /// <summary>キャレットの後ろの文字が英語なら true、日本語なら false、分からなければ null。</summary>
     public bool? FollowingEnglish { get; set; }
+
+    /// <summary>The committed text before the caret ends with Hangul: keys romaji can also read (go = 해) may continue Korean.</summary>
+    public bool PrecedingKorean { get; set; }
 
     /// <summary>変換用の区間分け。末尾の入力途中の子音は確定扱い (n → ん) にして日本語区間の読みに含める。</summary>
     public IReadOnlyList<CompositionSegment> ConversionSegments()
@@ -777,7 +786,7 @@ public sealed class CompositionText
             var segment = segments[i];
             if (segment.IsEnglish)
             {
-                builder.Append(segment.Raw);
+                builder.Append(segment.Shown);
                 continue;
             }
             var isLast = i == segments.Count - 1;
@@ -1013,7 +1022,7 @@ public sealed class CompositionText
             // 5 文字以上の知っている語 (meeting) か、同梱の英語の辞書の 2〜4 文字の語 (user・rta・av)
             // 4 文字の知っている語で、ローマ字として読めないもの (help・milk) も英語 (help|pe-ji → へおっぺーじ にしない)
             var lower = segment.Raw.ToLowerInvariant();
-            var word = segment.IsProtected || segment.IsEnglish && (segment.Raw.Length >= 5 && _detector.IsKnownEnglishWord(segment.Raw) || segment.Raw.Length is >= 2 and <= 4 && _detector.IsListedEnglishWord(lower) ||
+            var word = segment.IsProtected || segment.IsKorean || segment.IsEnglish && (segment.Raw.Length >= 5 && _detector.IsKnownEnglishWord(segment.Raw) || segment.Raw.Length is >= 2 and <= 4 && _detector.IsListedEnglishWord(lower) ||
                 segment.Raw.Length == 4 && _detector.IsKnownEnglishWord(lower) && !_detector.Romaji.Analyze(lower).IsValid ||
                 // 3 文字のスペルチェッカーの語で、最後の子音がかなにならないもの (tab|de の b)。表示で英字にしたものを、確定で打ち間違いとして たべ に直さない (issue #220)
                 segment.Raw.Length == 3 && lower.All(char.IsAsciiLetterLower) && _detector.IsSpellWord(lower) && _detector.Romaji.AnalyzeFragment(lower).Partial.Length > 0);

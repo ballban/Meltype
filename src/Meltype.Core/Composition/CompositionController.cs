@@ -396,6 +396,9 @@ public sealed class CompositionController
 
         /// <summary>候補のうち英訳 (複雑な → complex) のもの。</summary>
         public HashSet<string> Translations { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>A Korean (Dubeolsik) clause: Reading is the typed keys and the first candidate is the Hangul.</summary>
+        public bool IsKorean { get; init; }
     }
 
     public CompositionController(CaptureGate gate, CompositionDetector detector, IKanjiConverter converter, ICompositionHost host, CompositionOptions? options = null)
@@ -1074,6 +1077,7 @@ public sealed class CompositionController
         var output = new StringBuilder();
         var kana = new StringBuilder();
         var englishWords = 0;
+        var korean = false;
         foreach (var word in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
         {
             // 前の語が日本語でも「日本語の続き」とはしない (空白で区切って打った語なので、語の途中ではない)。
@@ -1082,6 +1086,7 @@ public sealed class CompositionController
             {
                 PrecedingEnglish = englishWords > 0 ? true : null,
                 PrecedingEnglishSentence = englishWords >= 2,
+                PrecedingKorean = korean,
                 Punctuation = _options.Punctuation(),
             };
             foreach (var c in word) typed.Append(c);
@@ -1097,9 +1102,10 @@ public sealed class CompositionController
                 if (kana.Length > 0) output.Append(Convert(kana.ToString()));
                 kana.Clear();
                 if (output.Length > 0 && output[^1] != ' ') output.Append(' ');
-                output.Append(segment.Raw).Append(' ');
+                output.Append(segment.Shown).Append(' ');
             }
-            englishWords = segments.Count > 0 && segments[^1].IsEnglish ? (segments.Count == 1 ? englishWords + 1 : 1) : 0;
+            korean = segments.Count > 0 && segments[^1].IsKorean;
+            englishWords = segments.Count > 0 && segments[^1].IsEnglish && !korean ? (segments.Count == 1 ? englishWords + 1 : 1) : 0;
         }
         if (kana.Length > 0) output.Append(Convert(kana.ToString()));
         return output.ToString().TrimEnd();
@@ -1130,6 +1136,7 @@ public sealed class CompositionController
         // 自分が確定した直後は、アプリ側のテキストがまだ更新されていないかもしれないので自分の記録を信じる。
         var recentOwnCommit = Environment.TickCount64 - _lastCommitTime < OwnCommitTrustMs;
         _precedingText = _lastCommitEnglish is null ? null : _lastCommitText;
+        _text.PrecedingKorean = Dubeolsik.EndsWithHangul(_precedingText);
         UpdateWideContext();
         _followingText = null;
         _caretBefore = null; // 読み直せなければ (返ってこなければ) キャレットの位置は確かめない = 今までどおり直す
@@ -1147,6 +1154,7 @@ public sealed class CompositionController
             if (!recentOwnCommit && before is not null)
             {
                 _precedingText = before;
+                _text.PrecedingKorean = Dubeolsik.EndsWithHangul(before);
                 UpdateWideContext();
                 if (LanguageOf(before) is { } english) _text.PrecedingEnglish = english;
                 UpdateLearningContext();
@@ -1665,6 +1673,17 @@ public sealed class CompositionController
         for (var s = 0; s < segments.Count; s++)
         {
             var segment = segments[s];
+            if (segment.IsKorean)
+            {
+                // Hangul first, then the typed keys, then the keys read as romaji (F6 and the candidates switch back to Japanese)
+                var hangulReading = RomajiReading(segment.Raw);
+                List<string> hangulRomaji = hangulReading is null ? [] : JapaneseCandidates(hangulReading, null);
+                clauses.Add(new Clause(segment.Raw, true, preferJapanese && hangulRomaji.Count > 0
+                    ? Distinct([.. hangulRomaji, segment.Kana, segment.Raw])
+                    : Distinct([segment.Kana, segment.Raw, .. hangulRomaji]))
+                { Kana = _text.KanaForSegment(s), IsKorean = true });
+                continue;
+            }
             if (segment.IsEnglish)
             {
                 if (segment.IsProtected && !preferJapanese)
@@ -1685,7 +1704,8 @@ public sealed class CompositionController
                 List<string> romaji = reading is null ? [] : JapaneseCandidates(reading, null);
                 clauses.Add(new Clause(segment.Raw, true, preferJapanese && romaji.Count > 0
                     ? Distinct([.. romaji, .. english])
-                    : Distinct([.. english, .. romaji, .. NumberCandidates.For(segment.Raw)])) { Kana = _text.KanaForSegment(s) });
+                    : Distinct([.. english, .. romaji, .. NumberCandidates.For(segment.Raw)]))
+                { Kana = _text.KanaForSegment(s) });
                 continue;
             }
             if (segment.Kana.Length == 0) continue;
@@ -2807,7 +2827,7 @@ public sealed class CompositionController
         var automatic = _text.Segments();
         switch (_text.Mode)
         {
-            case DisplayMode.HalfWidthAlphanumeric or DisplayMode.FullWidthAlphanumeric when !automatic.All(s => s.IsEnglish):
+            case DisplayMode.HalfWidthAlphanumeric or DisplayMode.FullWidthAlphanumeric when !automatic.All(s => s.IsEnglish && !s.IsKorean):
                 memory.Remember(raw, english: true, explicitChoice: true);
                 break;
             case DisplayMode.Hiragana or DisplayMode.Katakana or DisplayMode.HalfWidthKatakana when automatic.Any(s => s.IsEnglish):
@@ -2922,6 +2942,11 @@ public sealed class CompositionController
         {
             _options.Languages?.Remember(clause.Raw!, english: true);
         }
+        // Choosing the typed keys over the Hangul keeps those keys English next time
+        foreach (var clause in _clauses.Where(c => c.IsKorean && c.Changed && c.Text == c.Reading && c.Reading.All(char.IsAsciiLetter)))
+        {
+            _options.Languages?.Remember(clause.Reading, english: true);
+        }
         // 英語と判定した語で日本語の候補 (go → 語) を選んだら、その語は次から日本語にする (F6 と同じ)。
         foreach (var clause in _clauses.Where(c => c.IsEnglish && IsJapaneseText(c.Text) && c.Reading.All(char.IsAsciiLetter)))
         {
@@ -2998,11 +3023,13 @@ public sealed class CompositionController
         _clauses = [];
         if (text.Length == 0) return;
         if (formatEnglish && !preserveText) text = EnglishPhraseSpacing.Format(text);
-        var corrected = CorrectPreviousCommit(raw, english);
+        // Korean is neither of the two languages a later word may re-decide, and the next word reads it as non-English context
+        var hangul = text.Any(Dubeolsik.IsHangul);
+        var corrected = hangul ? null : CorrectPreviousCommit(raw, english);
         if (!preserveText && (_options.SpaceAroundEnglish() || _options.SpaceAroundNumbers()))
             text = AddSpacesAroundEnglish(text, corrected ?? _precedingText, _followingText, _options.SpaceAroundEnglish(), _options.SpaceAroundNumbers());
         // 英語とも日本語とも読める語を、文脈を決めずに (選び直さずに) 確定したときだけ、後で確定し直せるようにしておく。
-        if (!chosen && _detector.IsAmbiguousWord(raw))
+        if (!chosen && !hangul && _detector.IsAmbiguousWord(raw))
         {
             // 前の語の後に Space で区切って続けたときだけつなげる (それ以外は新しい並び)。
             if (_correctable.Count > 0 && !_correctable[^1].SpaceIntended) _correctable.Clear();
@@ -3010,7 +3037,7 @@ public sealed class CompositionController
             if (_correctable.Count > MaxCorrectable) _correctable.RemoveAt(0);
         }
         else _correctable.Clear();
-        _lastCommitEnglish = english;
+        _lastCommitEnglish = hangul ? LanguageOf(text) ?? false : english;
         var joined = (_lastCommitText ?? "") + text;
         _lastCommitText = joined.Length > 20 ? joined[^20..] : joined;
         _lastCommitTime = Environment.TickCount64;

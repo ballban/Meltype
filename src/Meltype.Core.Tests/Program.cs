@@ -40,7 +40,7 @@ internal static class Program
                     CompositionTests.Detector.LatticeTrace = Console.WriteLine;
                     var segments = text.Segments();
                     CompositionTests.Detector.LatticeTrace = null;
-                    Console.WriteLine("segments: " + string.Join(" | ", segments.Select(s => (s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
+                    Console.WriteLine("segments: " + string.Join(" | ", segments.Select(s => (s.IsKorean ? "KO:" + s.Kana + "=" : s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
                 }
                 return 0;
             case "--eval-json":

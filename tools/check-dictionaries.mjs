@@ -57,6 +57,12 @@ const formats = {
   'katakana.txt': tabbed(1, 1, ([reading]) => [hiragana.test(reading) ? null : `読み「${reading}」がひらがなでない`]),
   'emoji.txt': tabbed(2, 99, () => []),
   'emoji-cldr.txt': tabbed(2, 99, () => []),
+  // Tier, then runs of Hangul syllables (common 가각간…)
+  'korean-syllables.txt': spaced((tier, rest) => [
+    ['common', 'standard'].includes(tier) ? null : `tier "${tier}" is not common or standard`,
+    rest.length === 0 ? 'no syllables' : null,
+    ...rest.filter(s => !/^[가-힣]+$/.test(s)).map(s => `"${s}" is not Hangul syllables`),
+  ]),
 };
 
 function spaced(check) {

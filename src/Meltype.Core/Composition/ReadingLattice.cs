@@ -17,6 +17,9 @@ namespace Meltype.Composition;
 /// - 判定の強さが手動なら、Shift を押して打った大文字で始まる語だけを英語のノードにする。
 /// - 記号・数字の決まり (ドメイン・拡張子・ユーザー名・- の入った語・数字を挟んだ略語・英文の中の記号) は、コストで比べずにその区間を英語にする。
 /// - ローマ字入力では 1 文字ずつを区切りの位置にする (単位の途中で区切れる: get|Element、medal|s|ha)。かな入力では打った単位の境目だけ。
+/// - Korean (Dubeolsik) spans must join into whole syllables. They need a letter romaji cannot read unless Korean is already being typed.
+///   Inside a run of letters, Korean joins another language only as a word of common syllables (오늘|tennki|good) or as a particle or
+///   하다 ending after a known English word (github에서).
 /// </summary>
 public sealed partial class CompositionDetector
 {
@@ -83,10 +86,27 @@ public sealed partial class CompositionDetector
     // 1 つの候補として見る長さの上限 (ローマ字の文字数)
     private const int MaxSpan = 48;
 
-    private enum Side : byte { None, Japanese, English, Sentence }
+    // ---- Korean (Dubeolsik) edges ----
+    // Each Korean edge. Short words cost about what an unknown English letter does (1.5), so letters spelling a Korean word by chance
+    // need several syllables (3 common ones = 4.4) to beat Japanese (dl|する = 3.8).
+    private const double KoreanWordCost = 0.8;
+    // Each syllable, by its tier in korean-syllables.txt. A rare syllable (뮻) is almost never typed on purpose.
+    private const double CommonSyllableCost = 1.2;
+    private const double StandardSyllableCost = 2.2;
+    private const double RareSyllableCost = 5;
+    // A consonant still waiting for its vowel at the end of the input (안녕ㅎ)
+    private const double KoreanJamoCost = 0.5;
+    // Switching into Korean from Japanese or English
+    private const double KoreanSwitchCost = 1;
 
-    /// <summary>区切りの 1 つの候補。Kana は日本語の候補の読み。Letters は英字を含む日本語の候補か。Neutral は記号・数字・空白 (言語を切り替えない)。</summary>
-    private readonly record struct LatticeEdge(int Start, int End, bool English, string Kana, bool Letters, bool Particle, bool Neutral = false, bool Name = false);
+    private enum Side : byte { None, Japanese, English, Sentence, Korean }
+
+    /// <summary>
+    /// 区切りの 1 つの候補。Kana は日本語の候補の読み。Letters は英字を含む日本語の候補か。Neutral は記号・数字・空白 (言語を切り替えない)。
+    /// Unknown: an English edge made of unknown letters, not a word. Korean: Kana holds the Hangul.
+    /// </summary>
+    private readonly record struct LatticeEdge(int Start, int End, bool English, string Kana, bool Letters, bool Particle, bool Neutral = false, bool Name = false,
+        bool Unknown = false, bool Korean = false);
 
     private sealed record LatticeNode(double Cost, LatticeNode? Previous, LatticeEdge Edge);
 
@@ -96,9 +116,9 @@ public sealed partial class CompositionDetector
     /// </summary>
     private readonly record struct LatticeState(Side Side, bool Particle, bool AllEnglish, bool PreviousEnglish, bool Sokuon = false, bool ContextSwitch = false)
     {
-        public const int Count = 128;
-        public int Key => (int)Side | (Particle ? 4 : 0) | (AllEnglish ? 8 : 0) | (PreviousEnglish ? 16 : 0) | (Sokuon ? 32 : 0) | (ContextSwitch ? 64 : 0);
-        public static LatticeState FromKey(int key) => new((Side)(key & 3), (key & 4) != 0, (key & 8) != 0, (key & 16) != 0, (key & 32) != 0, (key & 64) != 0);
+        public const int Count = 256;
+        public int Key => (int)Side | (Particle ? 8 : 0) | (AllEnglish ? 16 : 0) | (PreviousEnglish ? 32 : 0) | (Sokuon ? 64 : 0) | (ContextSwitch ? 128 : 0);
+        public static LatticeState FromKey(int key) => new((Side)(key & 7), (key & 8) != 0, (key & 16) != 0, (key & 32) != 0, (key & 64) != 0, (key & 128) != 0);
         public bool IsEnglish => Side is Side.English or Side.Sentence;
     }
 
@@ -106,7 +126,7 @@ public sealed partial class CompositionDetector
     internal Action<string>? LatticeTrace { get; set; }
 
     private List<CompositionSegment> FindSpansByReading(IReadOnlyList<CompositionUnit> units, string pending, bool? precedingEnglish, bool? followingEnglish,
-        DetectionLevel level, bool englishSentence, bool kanaInput, double extraEnglishBias = 0)
+        DetectionLevel level, bool englishSentence, bool kanaInput, double extraEnglishBias = 0, bool korean = false, bool precedingKorean = false)
     {
         var text = _preparedRaw + pending;
         var length = text.Length;
@@ -125,21 +145,26 @@ public sealed partial class CompositionDetector
 
         // 知らない英字として英語にできる文字 (ローマ字として読めない英字・大文字・打ち終わって読めない入力途中の子音) の数の累積
         var unknown = new int[length + 1];
+        // The same count without the final pending consonants, which romaji may still read once a vowel follows
+        var unreadableTyped = new int[length + 1];
         // 入力途中の子音は、入力中も Enter のときと同じ読みで重みを付ける (表示と確定の区切りを揃える)
         var finalPending = _romaji.ConvertLenient(pending.ToLowerInvariant(), final: true);
         for (var p = 0; p < length; p++)
         {
             var c = text[p];
-            var unreadable = char.IsAsciiLetterUpper(c) ||
-                (p < unitsEnd ? unitAt[p] is var k and >= 0 && _preparedUnreadable[k + 1] > _preparedUnreadable[k] : finalPending.Any(char.IsAsciiLetter));
+            var typed = char.IsAsciiLetterUpper(c) || p < unitsEnd && unitAt[p] is var k and >= 0 && _preparedUnreadable[k + 1] > _preparedUnreadable[k];
+            var unreadable = typed || p >= unitsEnd && finalPending.Any(char.IsAsciiLetter);
             unknown[p + 1] = unknown[p] + (char.IsAsciiLetter(c) && unreadable ? 1 : 0);
+            unreadableTyped[p + 1] = unreadableTyped[p] + (char.IsAsciiLetter(c) && typed ? 1 : 0);
         }
 
         // 判定の強さ: 英語の候補の重みに足す
         var englishBias = extraEnglishBias + level switch { DetectionLevel.Aggressive => AggressiveEnglishBias, DetectionLevel.Conservative => ConservativeEnglishBias, _ => 0 };
         var best = new LatticeNode?[length + 1, LatticeState.Count];
-        var start = new LatticeState(precedingEnglish switch { true => englishSentence ? Side.Sentence : Side.English, false => Side.Japanese, null => Side.None },
-            false, true, precedingEnglish == true, ContextSwitch: precedingEnglish == true);
+        var start = korean && precedingKorean
+            ? new LatticeState(Side.Korean, false, true, true)
+            : new LatticeState(precedingEnglish switch { true => englishSentence ? Side.Sentence : Side.English, false => Side.Japanese, null => Side.None },
+                false, true, precedingEnglish == true, ContextSwitch: precedingEnglish == true);
         best[0, start.Key] = new LatticeNode(0, null, default);
 
         void Offer(int position, LatticeState state, LatticeNode node)
@@ -168,7 +193,15 @@ public sealed partial class CompositionDetector
         {
             double step;
             LatticeState next;
-            var japanese = !edge.English && !edge.Neutral;
+            var japanese = !edge.English && !edge.Neutral && !edge.Korean;
+            // Inside one run of letters, Korean meets another language only as a word of common syllables (오늘|tennki, tennki|오늘)
+            // or as a particle or 하다 ending after a known English word (github에서, push했다).
+            // Anything else there is a typo or an English word that spells Hangul by chance (procras|샤칟, python|샐르|peg).
+            if (edge.Start > 0 && char.IsAsciiLetter(text[edge.Start - 1]) && char.IsAsciiLetter(text[edge.Start]) &&
+                (edge.Korean
+                    ? state.Side != Side.Korean && !IsCommonKoreanWord(edge.Kana) &&
+                      (!from.Edge.English || from.Edge.Unknown || !KoreanSuffixStarts.Contains(edge.Kana[0]))
+                    : state.Side == Side.Korean && !IsCommonKoreanWord(from.Edge.Kana))) return;
             // 子音を重ねて打った っ は、前後をかなに挟まれているときだけ軽い (excelとっpt・cwっで にしない。ltu・xtu で打った っ と、Goって の って は除く)
             var vowel = japanese && state.PreviousEnglish && edge.Start > 0 && char.IsAsciiLetterLower(text[edge.Start - 1]) && edge.Kana is [var head, ..] &&
                 ("ぁぃぅぇぉ".Contains(head) || "あいうえお".Contains(head) && !"aeiou".Contains(text[edge.Start - 1])) ? VowelAfterEnglishCost : 0;
@@ -186,24 +219,34 @@ public sealed partial class CompositionDetector
                     // 英字 → 日本語 → 英字 と、英字のあいだで区切りなしに戻る (procras|ち|cle)。あいだが付属語を含むとき (excel|と|ppt) は除く
                     var run = from;
                     var particle = run.Edge.Particle;
-                    while (run.Previous is { } previous && !run.Edge.English && !run.Edge.Neutral) { if (previous.Edge.English || previous.Edge.Neutral) break; run = previous; particle |= run.Edge.Particle; }
+                    while (run.Previous is { } previous && !run.Edge.English && !run.Edge.Neutral) { if (previous.Edge.English || previous.Edge.Neutral || previous.Edge.Korean) break; run = previous; particle |= run.Edge.Particle; }
                     if (!particle && run.Previous is { Edge.English: true } before && before.Edge.End == run.Edge.Start && run.Edge.Start > 0 && char.IsAsciiLetter(text[run.Edge.Start - 1])) step += SandwichCost;
                 }
                 if (state.Side == Side.Japanese && !state.Particle) step += SwitchCost;
+                if (state.Side == Side.Korean && char.IsAsciiLetter(text[edge.Start])) step += SwitchCost;
                 if (state.IsEnglish && edge.Start > 0 && char.IsAsciiLetter(text[edge.Start - 1]) && char.IsAsciiLetter(text[edge.Start])) step += AdjacentEnglishCost;
                 // 英文の続きの強さは、最初の英語の語までで使い終わる (英文の中の記号では使い終わらない)
                 var sentence = state.Side == Side.Sentence && !char.IsAsciiLetter(text[edge.Start]);
-                next = new LatticeState(sentence ? Side.Sentence : Side.English, false, state.AllEnglish, true, ContextSwitch: state.ContextSwitch);
+                // Punctuation after Korean (안녕하세요.) stays ASCII and keeps the Korean context
+                var side = state.Side == Side.Korean && !char.IsAsciiLetter(text[edge.Start]) ? Side.Korean : sentence ? Side.Sentence : Side.English;
+                next = new LatticeState(side, false, state.AllEnglish, true, ContextSwitch: state.ContextSwitch);
             }
             else if (edge.Neutral)
             {
                 step = cost;
                 next = state with { PreviousEnglish = false };
             }
+            else if (edge.Korean)
+            {
+                step = cost + (state.Side is Side.None or Side.Korean ? 0 : KoreanSwitchCost);
+                // PreviousEnglish keeps ASCII punctuation after Korean
+                next = new LatticeState(Side.Korean, false, state.AllEnglish, true);
+            }
             else
             {
                 step = cost;
                 if (state.Side == Side.Sentence) step += SentenceSwitchCost;
+                else if (state.Side == Side.Korean) step += SwitchCost;
                 // 3 文字以上の英単語の後ろの、助詞と同じかなで始まる語 (java|のこ・java|でかく) も、助詞からの切り替えと同じ重みにする
                 // (日本語の道だけが の|こ を のこ にまとめられて、英語が負ける。so|ですか・ma|のなか のような 2 文字の語は除く)
                 else if (state.IsEnglish && !edge.Particle &&
@@ -222,6 +265,7 @@ public sealed partial class CompositionDetector
             if (!IsBoundary(p)) continue;
             var japanese = JapaneseEdges(units, text, p, unitOf, unitsEnd, pending, kanaInput);
             var english = EnglishEdges(text, p, unknown, kanaInput, level, IsBoundary, precedingEnglish == true);
+            var hangul = korean ? KoreanEdges(text, p, unreadableTyped) : [];
             var unit = p < unitsEnd ? unitAt[p] : -1;
             // 記号・数字・空白・z の記号 (zh = ←) の単位: 言語を切り替えない
             LatticeEdge? neutral = unit >= 0 && !IsKanaUnit(units[unit]) && !IsLetterUnit(units[unit])
@@ -267,6 +311,9 @@ public sealed partial class CompositionDetector
                 if (neutral is { } symbol) OfferEdge(node, state, symbol, 0);
                 foreach (var (edge, cost) in japanese) OfferEdge(node, state, edge, cost);
                 foreach (var (edge, cost) in english) OfferEdge(node, state, edge, cost);
+                // Keys romaji can also read (go = ご, 해) are Korean only where Korean is already being typed
+                foreach (var (edge, cost, free) in hangul)
+                    if (free || state.Side == Side.Korean) OfferEdge(node, state, edge, cost);
             }
         }
 
@@ -290,12 +337,12 @@ public sealed partial class CompositionDetector
         }
         if (LatticeTrace is { } trace)
         {
-            trace($"lattice {text} (level {level}, preceding {precedingEnglish?.ToString() ?? "-"}, following {followingEnglish?.ToString() ?? "-"}, bias {englishBias})");
+            trace($"lattice {text} (level {level}, preceding {precedingEnglish?.ToString() ?? "-"}{(korean && precedingKorean ? " korean" : "")}, following {followingEnglish?.ToString() ?? "-"}, bias {englishBias})");
             foreach (var (cost, state, node) in finals.OrderBy(f => f.Cost))
             {
                 var path = new List<string>();
                 for (var at = node; at.Previous is { } previous; at = previous)
-                    path.Add($"{(at.Edge.English ? "EN" : at.Edge.Neutral ? "--" : "JA")}:{text[at.Edge.Start..at.Edge.End]}{(at.Edge.Kana.Length > 0 && at.Edge.Kana != text[at.Edge.Start..at.Edge.End] ? "=" + at.Edge.Kana : "")}+{at.Cost - previous.Cost:0.##}");
+                    path.Add($"{(at.Edge.Korean ? "KO" : at.Edge.English ? "EN" : at.Edge.Neutral ? "--" : "JA")}:{text[at.Edge.Start..at.Edge.End]}{(at.Edge.Kana.Length > 0 && at.Edge.Kana != text[at.Edge.Start..at.Edge.End] ? "=" + at.Edge.Kana : "")}+{at.Cost - previous.Cost:0.##}");
                 path.Reverse();
                 trace($"  {(node == chosen ? "*" : " ")} {cost:0.00} {state.Side}{(state.Particle ? " particle" : "")}{(state.Sokuon ? " sokuon" : "")}: {string.Join(" ", path)}");
             }
@@ -310,6 +357,18 @@ public sealed partial class CompositionDetector
     private static bool IsNounParticle(string kana) => NounParticles.Contains(kana) || IsSuruForm(kana) || kana is "し" or "さ" or "せ";
 
     private static readonly HashSet<string> NounParticles = ["が", "を", "に", "で", "と", "の", "は", "も", "へ", "や", "から", "まで", "より", "って", "だ", "です"];
+
+    /// <summary>
+    /// First syllables of what follows an English word inside Korean: particles (github에서・react를), 하다・되다 (push했다・deploy된) and 들・님.
+    /// </summary>
+    private static readonly HashSet<char> KoreanSuffixStarts = [.. "은는이가을를의에와과도만로으랑께처보까부마요야하한할해했함합되된될돼됐됨됩들님"];
+
+    /// <summary>
+    /// Two or more syllables, all common (오늘・안녕하세요). Letters of an English word rarely spell one by chance (샤칟・샐르・뮻), so it may
+    /// sit between Japanese and English letters without a space.
+    /// </summary>
+    private static bool IsCommonKoreanWord(string hangul) =>
+        hangul.Length >= 2 && hangul.All(c => Detection.Dubeolsik.IsSyllable(c) && Detection.Dubeolsik.Tier(c) == Detection.SyllableTier.Common);
 
     /// <summary>かなを、語にならないかなとして読むときの重み (1 音 3、っ・ー は 0.5。小書きのかな ゃ・ぃ は前のかなと 1 音)。</summary>
     private static double UnknownKana(string kana) =>
@@ -513,11 +572,48 @@ public sealed partial class CompositionDetector
             {
                 var name = span.Length >= 3 && char.IsAsciiLetterUpper(span[0]) && char.IsAsciiLetterLower(span[1]);
                 cost = span.Sum(ch => char.IsAsciiLetterUpper(ch) ? UnknownUpperCost : name ? NameLetterCost : UnknownLetterCost);
-                edges.Add((new LatticeEdge(start, end, true, "", false, false, Name: name), cost));
+                edges.Add((new LatticeEdge(start, end, true, "", false, false, Name: name, Unknown: true), cost));
                 continue;
             }
             else continue;
             edges.Add((new LatticeEdge(start, end, true, "", false, false), cost));
+        }
+        return edges;
+    }
+
+    /// <summary>
+    /// Korean (Dubeolsik) edges starting at start: keys that join into whole Hangul syllables.
+    /// A consonant still waiting for its vowel may only end the input (안녕ㅎ). Free means the span has a letter romaji cannot read,
+    /// so it is not a Japanese reading and needs no Korean context. Two keys alone (zh = 코) are too short to tell Korean from letters,
+    /// except right after an English word, where the suffix rule in OfferEdge decides (github에).
+    /// </summary>
+    private List<(LatticeEdge Edge, double Cost, bool Free)> KoreanEdges(string text, int start, int[] unreadableTyped)
+    {
+        var edges = new List<(LatticeEdge, double, bool)>();
+        if (!Detection.Dubeolsik.IsKey(text[start])) return edges;
+        var composer = new Detection.DubeolsikComposer();
+        var length = text.Length;
+        var afterLetter = start > 0 && char.IsAsciiLetter(text[start - 1]);
+        for (var end = start + 1; end <= length && end - start <= MaxSpan; end++)
+        {
+            if (!composer.Feed(text[end - 1]) || composer.HasStrayJamo || composer.EndsWithLoneVowel) break;
+            if (composer.EndsWithLoneConsonant && end < length) continue;
+            // A word the user taught as English or Japanese (F10・F6) stays that language
+            if (Memory?.Get(text[start..end].ToLowerInvariant()) is not null) continue;
+            var hangul = composer.Text;
+            var cost = KoreanWordCost + (composer.EndsWithLoneConsonant ? KoreanJamoCost : 0);
+            foreach (var c in hangul)
+            {
+                if (!Detection.Dubeolsik.IsSyllable(c)) continue;
+                cost += Detection.Dubeolsik.Tier(c) switch
+                {
+                    Detection.SyllableTier.Common => CommonSyllableCost,
+                    Detection.SyllableTier.Standard => StandardSyllableCost,
+                    _ => RareSyllableCost,
+                };
+            }
+            var free = composer.Syllables > 0 && unreadableTyped[end] > unreadableTyped[start] && (end - start >= 3 || afterLetter);
+            edges.Add((new LatticeEdge(start, end, false, hangul, false, false, Korean: true), cost, free));
         }
         return edges;
     }
@@ -559,13 +655,20 @@ public sealed partial class CompositionDetector
     /// </summary>
     private bool IsLatticeSpellWord(string lower) => IsSpellWord(lower) && Detection.BuiltInWordChecker.Shared.IsWord(lower);
 
-    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。</summary>
+    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。Korean edges in a row become one segment.</summary>
     private List<CompositionSegment> ToSegments(IReadOnlyList<CompositionUnit> units, string text, int[] unitAt, int unitsEnd, List<LatticeEdge> edges)
     {
         var segments = new List<CompositionSegment>();
         foreach (var edge in edges)
         {
             var raw = text[edge.Start..edge.End];
+            if (edge.Korean)
+            {
+                if (segments.Count > 0 && segments[^1].IsKorean)
+                    segments[^1] = segments[^1] with { Kana = segments[^1].Kana + edge.Kana, Raw = segments[^1].Raw + raw };
+                else segments.Add(new CompositionSegment(true, edge.Kana, raw) { IsKorean = true });
+                continue;
+            }
             var kana = edge.English ? "" : EdgeKana(units, text, unitAt, unitsEnd, edge);
             if (segments.Count > 0 && !edge.English && !segments[^1].IsEnglish)
                 segments[^1] = segments[^1] with { Kana = segments[^1].Kana + kana, Raw = segments[^1].Raw + raw };
