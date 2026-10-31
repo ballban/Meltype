@@ -27,6 +27,10 @@
     <!-- 今の版のリリースノート (docs/release-notes/<版>.md) を配布物の release-notes に入れる。更新したあとの初めての起動で見せる (issue #1207) -->
     <None Include="..\..\docs\release-notes\$(Version).md" Condition="Exists('..\..\docs\release-notes\$(Version).md')" Link="release-notes\$(Version).md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- Local runs only: librime and the Chinese dictionaries from native/rime/Get-Rime.ps1 go to rime\ next to Meltype.exe. Not published. -->
+  <ItemGroup Condition="Exists('..\..\native\rime\bin\rime.dll')">
+    <None Include="..\..\native\rime\bin\**\*" Exclude="..\..\native\rime\bin\.downloads\**" Link="rime\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+  </ItemGroup>
   <!-- タグのビルド (GitHub Actions の GITHUB_REF_TYPE=tag。手で push したタグも) では、リリースノートが無ければ止める。開発中のビルドは無くてもよい (GitHub のリリースのページへ案内する) -->
   <Target Name="RequireReleaseNotes" BeforeTargets="Build" Condition="'$(GITHUB_REF_TYPE)' == 'tag' And !Exists('..\..\docs\release-notes\$(Version).md')">
     <Error Text="docs/release-notes/$(Version).md がありません。リリースノートを書いて main に入れてから、タグを付けてください (docs/RELEASE.md)。" />

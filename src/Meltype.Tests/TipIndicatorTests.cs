@@ -10,6 +10,14 @@ namespace Meltype.Tests;
 
 internal static class TipIndicatorTests
 {
+    // Without one, CompositionService starts the Rime next to the binaries and deploys it into the user's data folder
+    private sealed class NoChinese : IChineseConverter
+    {
+        public bool IsReady => false;
+        public IReadOnlyList<string> Candidates(string pinyin, int max) => [];
+        public void Learn(string pinyin, string text) { }
+    }
+
     [Test]
     public static void Indicator_SettingsAreIndependentForKeyboardAndTsf()
     {
@@ -57,6 +65,7 @@ internal static class TipIndicatorTests
             Languages = new LanguageMemory(null),
             TranslationHistory = new TranslationHistory(null),
             Engine = () => ConversionEngine.System,
+            Chinese = new NoChinese(),
         });
         var indicator = (ModeIndicatorWindow)typeof(CompositionService).GetField("_indicator", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(composition)!;
         var area = Screen.PrimaryScreen!.WorkingArea;
@@ -102,6 +111,7 @@ internal static class TipIndicatorTests
             Languages = new LanguageMemory(null),
             TranslationHistory = new TranslationHistory(null),
             Engine = () => ConversionEngine.System,
+            Chinese = new NoChinese(),
         });
         using var server = new Tip.TipServer(invoker, composition, () => settings);
         var sessions = new Dictionary<string, MeltypeSession>();

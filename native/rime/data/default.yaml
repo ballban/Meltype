@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 ballban
+#
+# Rime settings shared by every schema. Meltype uses only its own pinyin schema.
+
+config_version: "2026.11.01"
+
+schema_list:
+  - schema: meltype_pinyin
+
+menu:
+  page_size: 9

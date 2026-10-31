@@ -156,6 +156,9 @@ public sealed record CompositionOptions
     /// <summary>英訳の候補 (複雑な → complex)。null なら出さない。</summary>
     public TranslationDictionary? Translations { get; init; }
 
+    /// <summary>Pinyin to Chinese conversion (librime). Null leaves Chinese spans as the typed letters.</summary>
+    public IChineseConverter? Chinese { get; init; }
+
     /// <summary>今の時刻 (いま・なう → 17:22 の候補に使う。テストで差し替える)。</summary>
     public Func<DateTime> Now { get; init; } = () => DateTime.Now;
 
@@ -342,6 +345,8 @@ public sealed class CompositionController
     private int _selectedClause;
     private bool _converting;
     private bool? _lastCommitEnglish;
+    // The last commit ended with Chinese. Hanzi such as 很好 look like Japanese kanji in the field, so the field alone cannot tell
+    private bool _lastCommitChinese;
     private string? _lastCommitText;
     private string? _precedingText;
     private string? _followingText;
@@ -399,6 +404,15 @@ public sealed class CompositionController
 
         /// <summary>A Korean (Dubeolsik) clause: Reading is the typed keys and the first candidate is the Hangul.</summary>
         public bool IsKorean { get; init; }
+
+        /// <summary>A Chinese (pinyin) clause: Reading and Raw are the typed pinyin and the first candidate is the Chinese.</summary>
+        public bool IsChinese { get; init; }
+
+        /// <summary>Candidates from the Chinese converter, in Chinese clauses and in Japanese or English clauses whose letters are pinyin.</summary>
+        public HashSet<string> ChineseCandidates { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The chosen candidate is Chinese: it is not learned as Japanese or English.</summary>
+        public bool ChoseChinese => ChineseCandidates.Contains(Text);
     }
 
     public CompositionController(CaptureGate gate, CompositionDetector detector, IKanjiConverter converter, ICompositionHost host, CompositionOptions? options = null)
@@ -600,6 +614,7 @@ public sealed class CompositionController
     public void ResetContext()
     {
         _lastCommitEnglish = null;
+        _lastCommitChinese = false;
         _lastCommitText = null;
         _caretBefore = null;
         _correctable.Clear();
@@ -837,7 +852,7 @@ public sealed class CompositionController
                 {
                     Commit(suffix: " ", fixEnglish: true);
                 }
-                else if (EndsWithEnglish()) CommitText(FixEnglishTypo(_text.RenderSegments(final: true, _options.LiveConversion() ? Convert : null)) + " ", english: true, _text.Raw);
+                else if (EndsWithEnglish()) CommitText(FixEnglishTypo(_text.RenderSegments(final: true, _options.LiveConversion() ? Convert : null, _options.LiveConversion() ? LiveChinese : null)) + " ", english: true, _text.Raw);
                 else if (SpaceCommitsAutoEnglish()) CommitText(FixEnglishTypo(_text.Raw) + " ", english: true, _text.Raw);
                 else
                 {
@@ -1078,6 +1093,7 @@ public sealed class CompositionController
         var kana = new StringBuilder();
         var englishWords = 0;
         var korean = false;
+        var chinese = false;
         foreach (var word in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
         {
             // 前の語が日本語でも「日本語の続き」とはしない (空白で区切って打った語なので、語の途中ではない)。
@@ -1087,6 +1103,7 @@ public sealed class CompositionController
                 PrecedingEnglish = englishWords > 0 ? true : null,
                 PrecedingEnglishSentence = englishWords >= 2,
                 PrecedingKorean = korean,
+                PrecedingChinese = chinese,
                 Punctuation = _options.Punctuation(),
             };
             foreach (var c in word) typed.Append(c);
@@ -1098,14 +1115,21 @@ public sealed class CompositionController
                     kana.Append(segment.Kana);
                     continue;
                 }
-                // 英語の語: 前の日本語をまとめて変換してから、空白で区切って足す
                 if (kana.Length > 0) output.Append(Convert(kana.ToString()));
                 kana.Clear();
+                // Chinese is written without spaces between words (nihao shijie → 你好世界)
+                if (segment.IsChinese)
+                {
+                    output.Append(ChineseText(segment.Raw));
+                    continue;
+                }
+                // 英語の語: 前の日本語をまとめて変換してから、空白で区切って足す
                 if (output.Length > 0 && output[^1] != ' ') output.Append(' ');
                 output.Append(segment.Shown).Append(' ');
             }
             korean = segments.Count > 0 && segments[^1].IsKorean;
-            englishWords = segments.Count > 0 && segments[^1].IsEnglish && !korean ? (segments.Count == 1 ? englishWords + 1 : 1) : 0;
+            chinese = segments.Count > 0 && segments[^1].IsChinese;
+            englishWords = segments.Count > 0 && segments[^1].IsEnglish && !korean && !chinese ? (segments.Count == 1 ? englishWords + 1 : 1) : 0;
         }
         if (kana.Length > 0) output.Append(Convert(kana.ToString()));
         return output.ToString().TrimEnd();
@@ -1137,6 +1161,7 @@ public sealed class CompositionController
         var recentOwnCommit = Environment.TickCount64 - _lastCommitTime < OwnCommitTrustMs;
         _precedingText = _lastCommitEnglish is null ? null : _lastCommitText;
         _text.PrecedingKorean = Dubeolsik.EndsWithHangul(_precedingText);
+        _text.PrecedingChinese = _detector.ChineseInput && (_lastCommitChinese || Pinyin.EndsWithChinese(_precedingText));
         UpdateWideContext();
         _followingText = null;
         _caretBefore = null; // 読み直せなければ (返ってこなければ) キャレットの位置は確かめない = 今までどおり直す
@@ -1155,6 +1180,8 @@ public sealed class CompositionController
             {
                 _precedingText = before;
                 _text.PrecedingKorean = Dubeolsik.EndsWithHangul(before);
+                _text.PrecedingChinese = _detector.ChineseInput && (Pinyin.EndsWithChinese(before) ||
+                    _lastCommitChinese && _lastCommitText is { Length: > 0 } last && before.TrimEnd().EndsWith(last.TrimEnd(), StringComparison.Ordinal));
                 UpdateWideContext();
                 if (LanguageOf(before) is { } english) _text.PrecedingEnglish = english;
                 UpdateLearningContext();
@@ -1349,7 +1376,8 @@ public sealed class CompositionController
     private bool SpaceCommitsAlphanumeric() =>
         _text.IsAlphanumericAt(final: true) && !(_text.Mode == DisplayMode.Auto && _text.IsNumeric && _text.Raw.All(char.IsAsciiDigit) && _text.PrecedingEnglish != true);
 
-    private bool SpaceCommitsAutoEnglish() => _text.Mode == DisplayMode.Auto && _detector.IsEnglishAtWordEnd(_text.Raw, _options.Level());
+    // Pinyin that is also an English word with an unfinished romaji end (hang) converts as Chinese when it was read as Chinese
+    private bool SpaceCommitsAutoEnglish() => _text.Mode == DisplayMode.Auto && _detector.IsEnglishAtWordEnd(_text.Raw, _options.Level()) && !EndsWithChinese();
 
     /// <summary>
     /// Space の分岐で変換を始める (StartConversion に行く) 場面か。Tab で始めるときも同じ場面に限る (issue #219)。
@@ -1684,6 +1712,22 @@ public sealed class CompositionController
                 { Kana = _text.KanaForSegment(s), IsKorean = true });
                 continue;
             }
+            if (segment.IsChinese)
+            {
+                // Chinese first and the typed pinyin after it. Pinyin that is also a common Japanese reading (danshi → 男子) puts
+                // the Japanese right after the first Chinese candidate; F6 and Shift+Space put it first
+                var hanzi = ChineseCandidates(segment.Raw, MaxChineseCandidates);
+                var pinyinReading = RomajiReading(segment.Raw);
+                List<string> pinyinRomaji = pinyinReading is null ? [] : JapaneseCandidates(pinyinReading, null);
+                List<string> ordered = preferJapanese && pinyinRomaji.Count > 0 ? [.. pinyinRomaji, .. hanzi, segment.Raw]
+                    : hanzi.Count == 0 ? [segment.Raw, .. pinyinRomaji]
+                    : _detector.IsCommonJapanese?.Invoke(segment.Raw) == true ? [hanzi[0], .. pinyinRomaji.Take(2), .. hanzi.Skip(1), segment.Raw, .. pinyinRomaji.Skip(2)]
+                    : [.. hanzi, segment.Raw, .. pinyinRomaji];
+                var chineseClause = new Clause(segment.Raw, true, Distinct([.. ordered])) { Raw = segment.Raw, Kana = _text.KanaForSegment(s), IsChinese = true };
+                chineseClause.ChineseCandidates.UnionWith(hanzi);
+                clauses.Add(chineseClause);
+                continue;
+            }
             if (segment.IsEnglish)
             {
                 if (segment.IsProtected && !preferJapanese)
@@ -1702,10 +1746,12 @@ public sealed class CompositionController
                 }
                 var reading = RomajiReading(segment.Raw);
                 List<string> romaji = reading is null ? [] : JapaneseCandidates(reading, null);
-                clauses.Add(new Clause(segment.Raw, true, preferJapanese && romaji.Count > 0
+                var englishClause = new Clause(segment.Raw, true, preferJapanese && romaji.Count > 0
                     ? Distinct([.. romaji, .. english])
                     : Distinct([.. english, .. romaji, .. NumberCandidates.For(segment.Raw)]))
-                { Kana = _text.KanaForSegment(s) });
+                { Kana = _text.KanaForSegment(s) };
+                AddChineseCandidates(englishClause, segment.Raw);
+                clauses.Add(englishClause);
                 continue;
             }
             if (segment.Kana.Length == 0) continue;
@@ -1722,6 +1768,7 @@ public sealed class CompositionController
                 AddTranslations(clause);
                 AddRawCandidates(clause);
                 MoveEmojiLast(clause);
+                if (clause.Raw is { } clauseRaw) AddChineseCandidates(clause, clauseRaw);
             }
             clauses.AddRange(japanese);
         }
@@ -2463,6 +2510,52 @@ public sealed class CompositionController
     /// <summary>日本語の候補 (かな・漢字) か。英語の文節で選ばれたら、その語を日本語として覚える。</summary>
     private static bool IsJapaneseText(string text) => text.Any(c => c is >= '぀' and <= 'ヿ' or >= '㐀' and <= '䶿' or >= '一' and <= '鿿');
 
+    private const int MaxChineseCandidates = 20;
+    // Chinese candidates for a Japanese or English clause whose letters are a listed pinyin word (danshi → 但是・women → 我们)
+    private const int ChineseCandidatesInOtherClause = 2;
+
+    /// <summary>The Chinese converter's candidates for the whole pinyin, or none when Chinese input is off or the engine is not ready.</summary>
+    private IReadOnlyList<string> ChineseCandidates(string pinyin, int max) =>
+        _detector.ChineseInput && _options.Chinese is { IsReady: true } chinese ? chinese.Candidates(pinyin, max) : [];
+
+    /// <summary>The first Chinese candidate for the pinyin, or the pinyin itself without one.</summary>
+    private string ChineseText(string pinyin) => ChineseCandidates(pinyin, 1) is [var first, ..] ? first : pinyin;
+
+    /// <summary>Live conversion of a Chinese segment, cached because the display is rebuilt on every key.</summary>
+    private string LiveChinese(string pinyin)
+    {
+        if (_liveChineseCache.TryGetValue(pinyin, out var cached)) return cached;
+        var text = ChineseText(pinyin);
+        // The last syllable is still being typed (nihaozh): the syllables before it stay converted
+        for (var cut = 1; text == pinyin && cut <= Pinyin.MaxSyllableLength && cut < pinyin.Length; cut++)
+        {
+            var (head, tail) = (pinyin[..^cut], pinyin[^cut..]);
+            if (Pinyin.IsSyllablePrefix(tail) && ChineseText(head) is var hanzi && hanzi != head) text = hanzi + tail;
+        }
+        // An engine still loading gives the pinyin back; do not keep that answer
+        if (text == pinyin) return text;
+        if (_liveChineseCache.Count > 256) _liveChineseCache.Clear();
+        _liveChineseCache[pinyin] = text;
+        return text;
+    }
+
+    private readonly Dictionary<string, string> _liveChineseCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A Japanese or English clause whose letters are a listed Chinese word (danshi → 男子 also reads 但是) shows the Chinese right after
+    /// its first candidate, so either language is one key away whichever way the detection went.
+    /// </summary>
+    private void AddChineseCandidates(Clause clause, string raw)
+    {
+        if (!_detector.ChineseInput || raw.Length < 2 || Pinyin.Word(raw) is null) return;
+        var hanzi = ChineseCandidates(raw, ChineseCandidatesInOtherClause).Where(c => !clause.Candidates.Contains(c)).ToList();
+        if (hanzi.Count == 0) return;
+        var current = clause.Text;
+        clause.Candidates.InsertRange(Math.Min(1, clause.Candidates.Count), hanzi);
+        clause.ChineseCandidates.UnionWith(hanzi);
+        clause.Index = Math.Max(0, clause.Candidates.IndexOf(current));
+    }
+
     private static List<string> Distinct(params string?[] candidates)
     {
         var list = new List<string>();
@@ -2508,6 +2601,8 @@ public sealed class CompositionController
         if (anchor < 0) return;
         var current = clause.Text;
         var merged = clause.Candidates.Take(anchor + 1).ToList();
+        // Chinese candidates put beside the first one (danshi → 男子 但是) stay there
+        if (!clause.IsChinese) merged.AddRange(clause.Candidates.Skip(anchor + 1).Where(clause.ChineseCandidates.Contains));
         foreach (var candidate in more(reading).Select(c => NormalizeHalfWidth(c, reading)).Concat(clause.Candidates.Skip(anchor + 1)))
         {
             if (!merged.Contains(candidate)) merged.Add(candidate);
@@ -2676,7 +2771,7 @@ public sealed class CompositionController
 
     /// <summary>今の表示 (ライブ変換が有効なら日本語区間は漢字に変換済み)。</summary>
     private string CurrentDisplay(bool final) =>
-        _text.Display(final, _options.LiveConversion() ? LiveConvert : null);
+        _text.Display(final, _options.LiveConversion() ? LiveConvert : null, _options.LiveConversion() ? LiveChinese : null);
 
     // ---- 確定 ----
 
@@ -2711,7 +2806,9 @@ public sealed class CompositionController
             text = shownKana[..^1] + "ん";
         }
         if (fixEnglish && !converting && _text.Mode == DisplayMode.Auto) text = FixEnglishTypo(text);
-        var english = converting ? _clauses.All(c => c.IsEnglish) : _text.IsAlphanumericAt(final: true);
+        var english = converting ? _clauses.All(c => c.IsEnglish && !c.ChoseChinese) : _text.IsAlphanumericAt(final: true);
+        // Ending with Chinese makes the next word read Chinese first (women → 我们 after 你好)
+        var chinese = converting ? _clauses[^1].ChoseChinese : EndsWithChinese();
         // F6〜F10 で、はっきり英字 / かなを選んで確定した語も、後から確定し直さない。
         var chosen = converting ? _clauses.Any(c => c.Changed) : _text.Mode != DisplayMode.Auto;
         if (_reconversion is { } selection)
@@ -2728,8 +2825,9 @@ public sealed class CompositionController
         RecordCorrection(converting, text, suffix);
         if (converting) Learn();
         else LearnLanguage();
-        RememberPhrase(converting ? string.Concat(_clauses.Select(c => c.IsEnglish ? "" : c.Reading)) : _text.AllKana(final: true), text, english);
-        CommitText(text + suffix, english, _text.Raw, chosen, preserveText);
+        RememberPhrase(converting ? string.Concat(_clauses.Select(c => c.IsEnglish ? "" : c.Reading)) : _text.AllKana(final: true), text,
+            english || converting && _clauses.Any(c => c.IsChinese || c.ChoseChinese));
+        CommitText(text + suffix, english, _text.Raw, chosen, preserveText, chinese);
     }
 
     /// <summary>
@@ -2744,8 +2842,10 @@ public sealed class CompositionController
         string shown;
         if (converting)
         {
-            // 英語 / 日本語を選び直した文節があるときだけ (漢字の選び直しは判定の間違いではない)
-            var switched = _clauses.Any(c => c.Changed && (c.IsEnglish ? IsJapaneseText(c.Text) : c.Raw is { } raw && c.Text == raw));
+            // 英語 / 日本語を選び直した文節があるときだけ (漢字の選び直しは判定の間違いではない)。Choosing between Chinese and another language counts too
+            var switched = _clauses.Any(c => c.Changed && (c.IsChinese || c.ChoseChinese
+                ? c.IsChinese != c.ChoseChinese
+                : c.IsEnglish ? IsJapaneseText(c.Text) : c.Raw is { } raw && c.Text == raw));
             if (!switched) return;
             shown = string.Concat(_clauses.Select(c => c.Candidates[0]));
         }
@@ -2827,7 +2927,7 @@ public sealed class CompositionController
         var automatic = _text.Segments();
         switch (_text.Mode)
         {
-            case DisplayMode.HalfWidthAlphanumeric or DisplayMode.FullWidthAlphanumeric when !automatic.All(s => s.IsEnglish && !s.IsKorean):
+            case DisplayMode.HalfWidthAlphanumeric or DisplayMode.FullWidthAlphanumeric when !automatic.All(s => s.IsEnglish && !s.IsOtherLanguage):
                 memory.Remember(raw, english: true, explicitChoice: true);
                 break;
             case DisplayMode.Hiragana or DisplayMode.Katakana or DisplayMode.HalfWidthKatakana when automatic.Any(s => s.IsEnglish):
@@ -2942,15 +3042,24 @@ public sealed class CompositionController
         {
             _options.Languages?.Remember(clause.Raw!, english: true);
         }
-        // Choosing the typed keys over the Hangul keeps those keys English next time
-        foreach (var clause in _clauses.Where(c => c.IsKorean && c.Changed && c.Text == c.Reading && c.Reading.All(char.IsAsciiLetter)))
+        // Choosing the typed keys over the Hangul or the Chinese keeps those keys English next time
+        foreach (var clause in _clauses.Where(c => (c.IsKorean || c.IsChinese) && c.Changed && c.Text == c.Reading && c.Reading.All(char.IsAsciiLetter)))
         {
             _options.Languages?.Remember(clause.Reading, english: true);
         }
         // 英語と判定した語で日本語の候補 (go → 語) を選んだら、その語は次から日本語にする (F6 と同じ)。
-        foreach (var clause in _clauses.Where(c => c.IsEnglish && IsJapaneseText(c.Text) && c.Reading.All(char.IsAsciiLetter)))
+        foreach (var clause in _clauses.Where(c => c.IsEnglish && !c.ChoseChinese && IsJapaneseText(c.Text) && c.Reading.All(char.IsAsciiLetter)))
         {
             _options.Languages?.Remember(clause.Reading, english: false);
+        }
+        // Chinese goes to the Chinese engine only, never to the Japanese history or the language memory
+        if (_options.Chinese is { IsReady: true } chineseEngine)
+        {
+            foreach (var clause in _clauses.Where(c => c.ChoseChinese && c.Raw is not null))
+            {
+                var (pinyin, chosen) = (clause.Raw!, clause.Text);
+                ThreadPool.QueueUserWorkItem(_ => chineseEngine.Learn(pinyin, chosen));
+            }
         }
         // 英訳を選んだら、英訳の記録に (普通の変換の学習より弱く効く)。
         foreach (var clause in _clauses.Where(c => c.Translations.Contains(c.Text)))
@@ -2968,6 +3077,7 @@ public sealed class CompositionController
             if (clause.Text == clause.Reading || clause.Text == CompositionText.ToKatakana(clause.Reading) || clause.Text == clause.Raw) continue;
             // 英訳は上で英訳の記録に入れた (ここで覚えると次から 1 番目に出てしまう)。
             if (clause.Translations.Contains(clause.Text)) continue;
+            if (clause.ChoseChinese) continue;
             if (IsDateTimeChoice(clause) || IsMathSymbolChoice(clause)) continue;
             history.Remember(clause.Reading, clause.Text);
         }
@@ -2991,7 +3101,7 @@ public sealed class CompositionController
         }
         foreach (var clause in _clauses)
         {
-            if (clause.IsEnglish || clause.Text == clause.Raw || clause.Translations.Contains(clause.Text) || clause.Reading.Any(char.IsAsciiLetterOrDigit) || IsDateTimeChoice(clause) || IsMathSymbolChoice(clause))
+            if (clause.IsEnglish || clause.ChoseChinese || clause.Text == clause.Raw || clause.Translations.Contains(clause.Text) || clause.Reading.Any(char.IsAsciiLetterOrDigit) || IsDateTimeChoice(clause) || IsMathSymbolChoice(clause))
             {
                 Flush();
                 continue;
@@ -3005,7 +3115,7 @@ public sealed class CompositionController
     private static readonly HashSet<string> BracketPairs = ["「」", "『』", "（）", "()", "［］", "[]", "｛｝", "{}", "【】", "〈〉", "《》", "〔〕", "\"\"", "“”"];
 
     /// <summary>確定して入力する。英語だったか日本語だったか・確定した文字列を、次の入力の文脈として覚えておく。</summary>
-    private void CommitText(string text, bool english, string raw = "", bool chosen = false, bool preserveText = false)
+    private void CommitText(string text, bool english, string raw = "", bool chosen = false, bool preserveText = false, bool chinese = false)
     {
         var formatEnglish = _options.AutomaticEnglishSpacing() && _text.Mode == DisplayMode.Auto;
         var spaceIntended = _spaceStartedConversion;
@@ -3023,13 +3133,14 @@ public sealed class CompositionController
         _clauses = [];
         if (text.Length == 0) return;
         if (formatEnglish && !preserveText) text = EnglishPhraseSpacing.Format(text);
-        // Korean is neither of the two languages a later word may re-decide, and the next word reads it as non-English context
+        // Korean and Chinese are neither of the two languages a later word may re-decide, and the next word reads Korean as non-English context
         var hangul = text.Any(Dubeolsik.IsHangul);
-        var corrected = hangul ? null : CorrectPreviousCommit(raw, english);
+        var otherLanguage = hangul || chinese;
+        var corrected = otherLanguage ? null : CorrectPreviousCommit(raw, english);
         if (!preserveText && (_options.SpaceAroundEnglish() || _options.SpaceAroundNumbers()))
             text = AddSpacesAroundEnglish(text, corrected ?? _precedingText, _followingText, _options.SpaceAroundEnglish(), _options.SpaceAroundNumbers());
         // 英語とも日本語とも読める語を、文脈を決めずに (選び直さずに) 確定したときだけ、後で確定し直せるようにしておく。
-        if (!chosen && !hangul && _detector.IsAmbiguousWord(raw))
+        if (!chosen && !otherLanguage && _detector.IsAmbiguousWord(raw))
         {
             // 前の語の後に Space で区切って続けたときだけつなげる (それ以外は新しい並び)。
             if (_correctable.Count > 0 && !_correctable[^1].SpaceIntended) _correctable.Clear();
@@ -3037,7 +3148,8 @@ public sealed class CompositionController
             if (_correctable.Count > MaxCorrectable) _correctable.RemoveAt(0);
         }
         else _correctable.Clear();
-        _lastCommitEnglish = hangul ? LanguageOf(text) ?? false : english;
+        _lastCommitEnglish = otherLanguage ? LanguageOf(text) ?? false : english;
+        _lastCommitChinese = chinese;
         var joined = (_lastCommitText ?? "") + text;
         _lastCommitText = joined.Length > 20 ? joined[^20..] : joined;
         _lastCommitTime = Environment.TickCount64;
@@ -3105,9 +3217,11 @@ public sealed class CompositionController
         return builder.ToString();
     }
 
-    /// <summary>変換ボックスの最後が英語の区間か (Space を空白として扱うか)。</summary>
+    /// <summary>変換ボックスの最後が英語の区間か (Space を空白として扱うか)。Chinese is not: Space converts it.</summary>
     private bool EndsWithEnglish() =>
-        _text.Mode == DisplayMode.Auto && _text.Segments() is { Count: > 0 } segments && segments[^1].IsEnglish;
+        _text.Mode == DisplayMode.Auto && _text.Segments() is { Count: > 0 } segments && segments[^1].IsEnglish && !segments[^1].IsChinese;
+
+    private bool EndsWithChinese() => _text.Mode == DisplayMode.Auto && _text.Segments() is [.., { IsChinese: true }];
 
     private void ReplayDown(KeyEvent e)
     {

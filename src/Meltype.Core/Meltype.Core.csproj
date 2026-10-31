@@ -13,6 +13,8 @@
     <Product>Meltype</Product>
     <Authors>Yukishiro</Authors>
     <Copyright>Copyright (C) 2026 雪代 / Yukishiro. GPL-3.0-or-later</Copyright>
+    <!-- RimeConverter calls librime's C API with pointers to its structs. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Meltype" />

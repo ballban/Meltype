@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 ballban
+#
+# Pinyin dictionary for Meltype: the character table and the base word list of rime-ice
+# (https://github.com/iDvel/rime-ice, GPL-3.0). native/rime/Get-Rime.ps1 downloads them into cn_dicts/.
+---
+name: meltype_pinyin
+version: "2026.11.01"
+sort: by_weight
+use_preset_vocabulary: false
+import_tables:
+  - cn_dicts/8105
+  - cn_dicts/base
+...

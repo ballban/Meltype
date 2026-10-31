@@ -29,6 +29,8 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
     // Mozc (同梱の mozc/meltype_mozc_helper.exe) と Microsoft IME を組み合わせた変換エンジン。
     private readonly MozcConverter _mozc = new(Path.Combine(AppContext.BaseDirectory, "mozc", "meltype_mozc_helper.exe"), Path.Combine(Config.AppPaths.DataDirectory, "mozc"));
     private HybridConverter _hybrid = null!;
+    // Pinyin to Chinese with librime (MELTYPE_RIME or rime\ next to the app; native/rime). Null when it is not there.
+    private readonly RimeConverter? _rime;
 
     // Zenzai (llama-server + zenz の GGUF)。設定で ON のときだけ、指定の場所・GPU の設定が変わるたびに作り直す (持ち主は ZenzaiHolder)
     private readonly ZenzaiHolder _zenzai = new();
@@ -49,6 +51,7 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
         detector.Memory = Languages;
         UserDictionary = options.UserDictionary ?? new UserDictionary(Config.AppPaths.UserDictionaryFile);
         _detector = detector;
+        _rime = options.Chinese is null ? RimeConverter.TryCreate(Path.Combine(Config.AppPaths.DataDirectory, "rime")) : null;
         var resolved = new CompositionOptions
         {
             LiveConversion = options.LiveConversion,
@@ -112,6 +115,7 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
             Predictor = options.Predictor ?? new Predictor(new PhraseHistory(Config.AppPaths.PhraseHistoryFile), UserDictionary, History),
             Predictions = options.Predictions,
             EnglishNamePredictions = options.EnglishNamePredictions,
+            Chinese = options.Chinese ?? _rime,
         };
         Phrases = resolved.Predictor?.Phrases;
         TranslationHistory = resolved.TranslationHistory;
@@ -121,6 +125,12 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
         // 直したときの「Zenzai を使う」も覚えておく (報告を開くまでに設定を変えても、直したときの設定で報告する。issue #1197)
         Controller.Corrected += correction => Corrections.Add(correction with { Zenzai = options.UseZenzai() });
         if (options.Engine() != Config.ConversionEngine.System && _mozc.IsInstalled) _mozc.WarmUp();
+        // Pinyin is read as Chinese only once Rime has deployed its dictionaries (seconds on the first start). The detector
+        // reads the flag on the next key, so setting it from the thread pool is enough.
+        _rime?.WhenReady.ContinueWith(ready =>
+        {
+            if (ready.Result) detector.ChineseInput = true;
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
         _showIndicator = options.ModeIndicator;
         _placement = options.Placement;
         _size = options.Size;
@@ -930,6 +940,7 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
         _converter.Dispose();
         _windowsCandidates.Dispose();
         _mozc.Dispose();
+        _rime?.Dispose();
         _zenzai.Dispose();
         _window.Dispose();
         _indicator.Dispose();

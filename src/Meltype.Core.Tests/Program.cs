@@ -23,7 +23,13 @@ internal static class Program
                 Console.WriteLine($"Meltype {Meltype.Config.ProjectInfo.CoreVersion}");
                 return 0;
             case "--eval":
+                // --eval zh: the same cases with pinyin read as Chinese too (Japanese and English must not change)
+                CompositionTests.Detector.ChineseInput = args.ElementAtOrDefault(1) == "zh";
                 Quality.Print(Quality.Run());
+                return 0;
+            case "--chinese-impact":
+                // --chinese-impact 出力ファイル: common Japanese readings and English words that read as Chinese without Chinese context
+                Impact.ChineseImpact(args[1]);
                 return 0;
             case "--repro":
                 // 打ったキーをそのまま打ってみて、結果を JSON で返す (GitHub の bot が報告を再現するのに使う)。
@@ -32,15 +38,18 @@ internal static class Program
                 return 0;
             case "--segments":
                 // 調べる用: 打った文字の単位と、英語 / 日本語の区間分け (Enter の前) と、区間分けのラティスの道と重み
+                //   --segments nihao [zh|zh-context] … zh reads pinyin too; zh-context also has Chinese before the caret
                 {
-                    var text = new Meltype.Composition.CompositionText(CompositionTests.Detector);
+                    var mode = args.ElementAtOrDefault(2);
+                    var text = new Meltype.Composition.CompositionText(CompositionTests.Detector) { PrecedingChinese = mode == "zh-context" };
+                    CompositionTests.Detector.ChineseInput = mode is "zh" or "zh-context";
                     foreach (var c in args.ElementAtOrDefault(1) ?? "") text.Append(c);
                     Console.OutputEncoding = new System.Text.UTF8Encoding(false);
                     Console.WriteLine("units: " + string.Join(" ", text.Units.Select(u => $"{u.Raw}={u.Kana}")) + (text.Pending.Length > 0 ? $" +{text.Pending}" : ""));
                     CompositionTests.Detector.LatticeTrace = Console.WriteLine;
                     var segments = text.Segments();
                     CompositionTests.Detector.LatticeTrace = null;
-                    Console.WriteLine("segments: " + string.Join(" | ", segments.Select(s => (s.IsKorean ? "KO:" + s.Kana + "=" : s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
+                    Console.WriteLine("segments: " + string.Join(" | ", segments.Select(s => (s.IsKorean ? "KO:" + s.Kana + "=" : s.IsChinese ? "ZH:" : s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
                 }
                 return 0;
             case "--eval-json":

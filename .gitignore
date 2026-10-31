@@ -26,6 +26,8 @@ mac/build/
 
 # Mozc の変換ヘルパー (native/mozc/Build-MozcHelper.ps1 で作る)
 native/mozc/bin/
+# librime と中国語の辞書 (native/rime/Get-Rime.ps1 で取得する)
+native/rime/bin/
 linux/build/
 tools/data/
 native/tip/bin/

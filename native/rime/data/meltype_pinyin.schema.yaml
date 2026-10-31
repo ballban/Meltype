@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 ballban
+#
+# Simplified Chinese full pinyin for Meltype. Meltype decides which letters are pinyin and passes them to Rime
+# as lowercase letters, so this schema only converts: no abbreviations, fuzzy initials or completion of the last
+# syllable, which keeps every candidate spelled out syllable by syllable.
+# The speller rules are adapted from rime_ice.schema.yaml of rime-ice (https://github.com/iDvel/rime-ice, GPL-3.0).
+
+schema:
+  schema_id: meltype_pinyin
+  name: Meltype 拼音
+  version: "2026.11.01"
+  author:
+    - ballban
+  description: |
+    Simplified Chinese full pinyin for Meltype, with the rime-ice dictionaries.
+
+engine:
+  processors:
+    - speller
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - abc_segmentor
+    - fallback_segmentor
+  translators:
+    - script_translator
+  filters:
+    - uniquifier
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+  algebra:
+    # rime-ice spells ü as v (nv lv nve lve) and as u after j q x y (ju qu xu yu). Also accept nue lue and jv qv xv yv.
+    - derive/^([nl])ve$/$1ue/
+    - derive/^([jqxy])u/$1v/
+
+translator:
+  dictionary: meltype_pinyin
+  enable_user_dict: true
+  enable_completion: false
+  enable_correction: false

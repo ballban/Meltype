@@ -20,6 +20,7 @@ namespace Meltype.Composition;
 /// - Korean (Dubeolsik) spans must join into whole syllables. They need a letter romaji cannot read unless Korean is already being typed.
 ///   Inside a run of letters, Korean joins another language only as a word of common syllables (오늘|tennki|good) or as a particle or
 ///   하다 ending after a known English word (github에서).
+/// - Chinese (pinyin) spans are lowercase and must split into whole syllables; only the end of the input may stop inside one (nihaozh).
 /// </summary>
 public sealed partial class CompositionDetector
 {
@@ -99,14 +100,34 @@ public sealed partial class CompositionDetector
     // Switching into Korean from Japanese or English
     private const double KoreanSwitchCost = 1;
 
-    private enum Side : byte { None, Japanese, English, Sentence, Korean }
+    // ---- Chinese (pinyin) edges ----
+    // A listed word of two or more syllables (nihao・jintian), whatever its length, like a Japanese word (1)
+    private const double ChineseCommonWordCost = 0.8;
+    private const double ChineseStandardWordCost = 1.6;
+    // A single syllable by its tier in chinese-pinyin.txt
+    private const double ChineseCommonSyllableCost = 1.2;
+    private const double ChineseStandardSyllableCost = 2.2;
+    private const double ChineseRareSyllableCost = 4;
+    // The start of a syllable still being typed at the end of the input (nihao|zh)
+    private const double ChinesePartialCost = 1;
+    // Starting Chinese without Chinese before the caret. Pinyin that also reads as a Japanese word (nani・danshi = 1) or is an English word
+    // (women = 1) stays that language; pinyin that is neither (nihao = 0.8 + 0.9 against に|はお = 1.8) becomes Chinese.
+    private const double ChineseStartCost = 0.9;
+    // Starting Chinese with a lone syllable that is not a listed word: la・fa・ma|la are also small-kana spellings (ぁ・ふぁ・まぁ) and one
+    // syllable says little about the language. Once Chinese has started, syllables pay nothing more (wohen|xi|huan).
+    private const double ChineseSyllableStartCost = 1.5;
+    // Chinese and Japanese meeting inside one run of letters (shita|ni・ni|hao): one sentence rarely mixes the two without a break
+    private const double ChineseJapaneseSplitCost = 3;
+
+    private enum Side : byte { None, Japanese, English, Sentence, Korean, Chinese }
 
     /// <summary>
     /// 区切りの 1 つの候補。Kana は日本語の候補の読み。Letters は英字を含む日本語の候補か。Neutral は記号・数字・空白 (言語を切り替えない)。
-    /// Unknown: an English edge made of unknown letters, not a word. Korean: Kana holds the Hangul.
+    /// Unknown: an English edge made of unknown letters, not a word. Korean: Kana holds the Hangul. Chinese: Kana holds the pinyin.
+    /// Syllable: a Chinese edge that is one syllable (or its start), not a listed word.
     /// </summary>
     private readonly record struct LatticeEdge(int Start, int End, bool English, string Kana, bool Letters, bool Particle, bool Neutral = false, bool Name = false,
-        bool Unknown = false, bool Korean = false);
+        bool Unknown = false, bool Korean = false, bool Chinese = false, bool Syllable = false);
 
     private sealed record LatticeNode(double Cost, LatticeNode? Previous, LatticeEdge Edge);
 
@@ -126,7 +147,8 @@ public sealed partial class CompositionDetector
     internal Action<string>? LatticeTrace { get; set; }
 
     private List<CompositionSegment> FindSpansByReading(IReadOnlyList<CompositionUnit> units, string pending, bool? precedingEnglish, bool? followingEnglish,
-        DetectionLevel level, bool englishSentence, bool kanaInput, double extraEnglishBias = 0, bool korean = false, bool precedingKorean = false)
+        DetectionLevel level, bool englishSentence, bool kanaInput, double extraEnglishBias = 0, bool korean = false, bool precedingKorean = false,
+        bool chinese = false, bool precedingChinese = false)
     {
         var text = _preparedRaw + pending;
         var length = text.Length;
@@ -163,6 +185,8 @@ public sealed partial class CompositionDetector
         var best = new LatticeNode?[length + 1, LatticeState.Count];
         var start = korean && precedingKorean
             ? new LatticeState(Side.Korean, false, true, true)
+            : chinese && precedingChinese
+            ? new LatticeState(Side.Chinese, false, true, false)
             : new LatticeState(precedingEnglish switch { true => englishSentence ? Side.Sentence : Side.English, false => Side.Japanese, null => Side.None },
                 false, true, precedingEnglish == true, ContextSwitch: precedingEnglish == true);
         best[0, start.Key] = new LatticeNode(0, null, default);
@@ -193,7 +217,8 @@ public sealed partial class CompositionDetector
         {
             double step;
             LatticeState next;
-            var japanese = !edge.English && !edge.Neutral && !edge.Korean;
+            var japanese = !edge.English && !edge.Neutral && !edge.Korean && !edge.Chinese;
+            var inLetters = edge.Start > 0 && char.IsAsciiLetter(text[edge.Start - 1]) && char.IsAsciiLetter(text[edge.Start]);
             // Inside one run of letters, Korean meets another language only as a word of common syllables (오늘|tennki, tennki|오늘)
             // or as a particle or 하다 ending after a known English word (github에서, push했다).
             // Anything else there is a typo or an English word that spells Hangul by chance (procras|샤칟, python|샐르|peg).
@@ -219,11 +244,12 @@ public sealed partial class CompositionDetector
                     // 英字 → 日本語 → 英字 と、英字のあいだで区切りなしに戻る (procras|ち|cle)。あいだが付属語を含むとき (excel|と|ppt) は除く
                     var run = from;
                     var particle = run.Edge.Particle;
-                    while (run.Previous is { } previous && !run.Edge.English && !run.Edge.Neutral) { if (previous.Edge.English || previous.Edge.Neutral || previous.Edge.Korean) break; run = previous; particle |= run.Edge.Particle; }
+                    while (run.Previous is { } previous && !run.Edge.English && !run.Edge.Neutral) { if (previous.Edge.English || previous.Edge.Neutral || previous.Edge.Korean || previous.Edge.Chinese) break; run = previous; particle |= run.Edge.Particle; }
                     if (!particle && run.Previous is { Edge.English: true } before && before.Edge.End == run.Edge.Start && run.Edge.Start > 0 && char.IsAsciiLetter(text[run.Edge.Start - 1])) step += SandwichCost;
                 }
                 if (state.Side == Side.Japanese && !state.Particle) step += SwitchCost;
                 if (state.Side == Side.Korean && char.IsAsciiLetter(text[edge.Start])) step += SwitchCost;
+                if (state.Side == Side.Chinese && char.IsAsciiLetter(text[edge.Start])) step += SwitchCost;
                 if (state.IsEnglish && edge.Start > 0 && char.IsAsciiLetter(text[edge.Start - 1]) && char.IsAsciiLetter(text[edge.Start])) step += AdjacentEnglishCost;
                 // 英文の続きの強さは、最初の英語の語までで使い終わる (英文の中の記号では使い終わらない)
                 var sentence = state.Side == Side.Sentence && !char.IsAsciiLetter(text[edge.Start]);
@@ -242,11 +268,18 @@ public sealed partial class CompositionDetector
                 // PreviousEnglish keeps ASCII punctuation after Korean
                 next = new LatticeState(Side.Korean, false, state.AllEnglish, true);
             }
+            else if (edge.Chinese)
+            {
+                step = cost + (state.Side == Side.Chinese ? 0 : ChineseStartCost + (edge.Syllable ? ChineseSyllableStartCost : 0))
+                    + (state.Side == Side.Japanese && inLetters ? ChineseJapaneseSplitCost : 0);
+                next = new LatticeState(Side.Chinese, false, state.AllEnglish, false);
+            }
             else
             {
                 step = cost;
                 if (state.Side == Side.Sentence) step += SentenceSwitchCost;
                 else if (state.Side == Side.Korean) step += SwitchCost;
+                else if (state.Side == Side.Chinese) step += SwitchCost + (inLetters ? ChineseJapaneseSplitCost : 0);
                 // 3 文字以上の英単語の後ろの、助詞と同じかなで始まる語 (java|のこ・java|でかく) も、助詞からの切り替えと同じ重みにする
                 // (日本語の道だけが の|こ を のこ にまとめられて、英語が負ける。so|ですか・ma|のなか のような 2 文字の語は除く)
                 else if (state.IsEnglish && !edge.Particle &&
@@ -266,6 +299,7 @@ public sealed partial class CompositionDetector
             var japanese = JapaneseEdges(units, text, p, unitOf, unitsEnd, pending, kanaInput);
             var english = EnglishEdges(text, p, unknown, kanaInput, level, IsBoundary, precedingEnglish == true);
             var hangul = korean ? KoreanEdges(text, p, unreadableTyped) : [];
+            var pinyin = chinese ? ChineseEdges(text, p) : [];
             var unit = p < unitsEnd ? unitAt[p] : -1;
             // 記号・数字・空白・z の記号 (zh = ←) の単位: 言語を切り替えない
             LatticeEdge? neutral = unit >= 0 && !IsKanaUnit(units[unit]) && !IsLetterUnit(units[unit])
@@ -308,12 +342,19 @@ public sealed partial class CompositionDetector
                     OfferEdge(node, state, new LatticeEdge(p, p + 1, true, "", false, false), 0);
                     continue;
                 }
-                if (neutral is { } symbol) OfferEdge(node, state, symbol, 0);
+                // Letters pinyin also reads (zh of nihaozh) cost as much as the syllable being typed, so the rest of the input decides
+                // between it and the romaji symbol (zh = ←); inside Chinese they are pinyin
+                if (neutral is { } symbol)
+                {
+                    var pinyinToo = pinyin.Any(e => e.Edge.End == symbol.End);
+                    if (!(pinyinToo && state.Side == Side.Chinese)) OfferEdge(node, state, symbol, pinyinToo ? ChinesePartialCost : 0);
+                }
                 foreach (var (edge, cost) in japanese) OfferEdge(node, state, edge, cost);
                 foreach (var (edge, cost) in english) OfferEdge(node, state, edge, cost);
                 // Keys romaji can also read (go = ご, 해) are Korean only where Korean is already being typed
                 foreach (var (edge, cost, free) in hangul)
                     if (free || state.Side == Side.Korean) OfferEdge(node, state, edge, cost);
+                foreach (var (edge, cost) in pinyin) OfferEdge(node, state, edge, cost);
             }
         }
 
@@ -337,12 +378,12 @@ public sealed partial class CompositionDetector
         }
         if (LatticeTrace is { } trace)
         {
-            trace($"lattice {text} (level {level}, preceding {precedingEnglish?.ToString() ?? "-"}{(korean && precedingKorean ? " korean" : "")}, following {followingEnglish?.ToString() ?? "-"}, bias {englishBias})");
+            trace($"lattice {text} (level {level}, preceding {precedingEnglish?.ToString() ?? "-"}{(korean && precedingKorean ? " korean" : "")}{(chinese && precedingChinese ? " chinese" : "")}, following {followingEnglish?.ToString() ?? "-"}, bias {englishBias})");
             foreach (var (cost, state, node) in finals.OrderBy(f => f.Cost))
             {
                 var path = new List<string>();
                 for (var at = node; at.Previous is { } previous; at = previous)
-                    path.Add($"{(at.Edge.Korean ? "KO" : at.Edge.English ? "EN" : at.Edge.Neutral ? "--" : "JA")}:{text[at.Edge.Start..at.Edge.End]}{(at.Edge.Kana.Length > 0 && at.Edge.Kana != text[at.Edge.Start..at.Edge.End] ? "=" + at.Edge.Kana : "")}+{at.Cost - previous.Cost:0.##}");
+                    path.Add($"{(at.Edge.Korean ? "KO" : at.Edge.Chinese ? "ZH" : at.Edge.English ? "EN" : at.Edge.Neutral ? "--" : "JA")}:{text[at.Edge.Start..at.Edge.End]}{(at.Edge.Kana.Length > 0 && at.Edge.Kana != text[at.Edge.Start..at.Edge.End] ? "=" + at.Edge.Kana : "")}+{at.Cost - previous.Cost:0.##}");
                 path.Reverse();
                 trace($"  {(node == chosen ? "*" : " ")} {cost:0.00} {state.Side}{(state.Particle ? " particle" : "")}{(state.Sokuon ? " sokuon" : "")}: {string.Join(" ", path)}");
             }
@@ -618,6 +659,41 @@ public sealed partial class CompositionDetector
         return edges;
     }
 
+    /// <summary>
+    /// Chinese (pinyin) edges starting at start: a listed word (nihao) or one syllable (hao) of lowercase letters, and at the end of the input
+    /// the start of a syllable still being typed (zh). A word the user taught as English or Japanese (F10・F6) stays that language.
+    /// </summary>
+    private List<(LatticeEdge Edge, double Cost)> ChineseEdges(string text, int start)
+    {
+        var edges = new List<(LatticeEdge, double)>();
+        var length = text.Length;
+        for (var end = start + 1; end <= length && end - start <= MaxSpan && char.IsAsciiLetterLower(text[end - 1]); end++)
+        {
+            var span = text[start..end];
+            var cost = Detection.Pinyin.Word(span) switch
+            {
+                Detection.SyllableTier.Common => ChineseCommonWordCost,
+                Detection.SyllableTier.Standard => ChineseStandardWordCost,
+                _ => double.MaxValue,
+            };
+            var syllable = false;
+            if (end - start <= Detection.Pinyin.MaxSyllableLength)
+            {
+                var syllableCost = Detection.Pinyin.Syllable(span) switch
+                {
+                    Detection.SyllableTier.Common => ChineseCommonSyllableCost,
+                    Detection.SyllableTier.Standard => ChineseStandardSyllableCost,
+                    Detection.SyllableTier.Rare => ChineseRareSyllableCost,
+                    _ => end == length && Detection.Pinyin.IsSyllablePrefix(span) ? ChinesePartialCost : double.MaxValue,
+                };
+                if (syllableCost < cost) (cost, syllable) = (syllableCost, true);
+            }
+            if (cost == double.MaxValue || Memory?.Get(span) is not null) continue;
+            edges.Add((new LatticeEdge(start, end, false, span, false, false, Chinese: true, Syllable: syllable), cost));
+        }
+        return edges;
+    }
+
     /// <summary>英単語の書き方の大文字・小文字か (its・Its・ITS と、固有名詞の書き方 GitHub)。iTs は its の書き方ではない。</summary>
     private bool IsWordCasing(string span) =>
         !span.Skip(1).Any(char.IsAsciiLetterUpper) || span.All(char.IsAsciiLetterUpper) || _proper.Canonical(span.ToLowerInvariant()) == span;
@@ -655,7 +731,7 @@ public sealed partial class CompositionDetector
     /// </summary>
     private bool IsLatticeSpellWord(string lower) => IsSpellWord(lower) && Detection.BuiltInWordChecker.Shared.IsWord(lower);
 
-    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。Korean edges in a row become one segment.</summary>
+    /// <summary>選んだ候補の並びを、英語・日本語の区間の並びにする (続いた日本語の候補は 1 つの区間にする。英語の候補は 1 つずつの区間)。Korean or Chinese edges in a row become one segment.</summary>
     private List<CompositionSegment> ToSegments(IReadOnlyList<CompositionUnit> units, string text, int[] unitAt, int unitsEnd, List<LatticeEdge> edges)
     {
         var segments = new List<CompositionSegment>();
@@ -667,6 +743,13 @@ public sealed partial class CompositionDetector
                 if (segments.Count > 0 && segments[^1].IsKorean)
                     segments[^1] = segments[^1] with { Kana = segments[^1].Kana + edge.Kana, Raw = segments[^1].Raw + raw };
                 else segments.Add(new CompositionSegment(true, edge.Kana, raw) { IsKorean = true });
+                continue;
+            }
+            if (edge.Chinese)
+            {
+                if (segments.Count > 0 && segments[^1].IsChinese)
+                    segments[^1] = segments[^1] with { Kana = segments[^1].Kana + raw, Raw = segments[^1].Raw + raw };
+                else segments.Add(new CompositionSegment(true, raw, raw) { IsChinese = true });
                 continue;
             }
             var kana = edge.English ? "" : EdgeKana(units, text, unitAt, unitsEnd, edge);

@@ -32,6 +32,36 @@ internal static class Impact
 
     private static IEnumerable<string> Readings() => Lines("readings.txt").Select(line => line.Split('\t')[0]);
 
+    /// <summary>
+    /// Common Japanese readings (as romaji) and English words that read as Chinese (pinyin) with no Chinese before the caret.
+    /// They are what turning Chinese on costs Japanese and English typing.
+    ///   dotnet run --project src/Meltype.Core.Tests -- --chinese-impact output
+    /// </summary>
+    public static void ChineseImpact(string output)
+    {
+        var detector = CompositionDetector.CreateDefault();
+        detector.SpellChecker ??= BuiltInWordChecker.Shared;
+        detector.ChineseInput = true;
+        var report = new StringBuilder();
+        foreach (var (name, words) in new[] { ("japanese", Readings().Select(ToRomaji).OfType<string>()), ("english", EnglishWords()) })
+        {
+            var all = words.Where(WordJudge.IsWord).Distinct(StringComparer.Ordinal).ToList();
+            var chinese = new List<string>();
+            foreach (var word in all)
+            {
+                var text = new CompositionText(detector);
+                foreach (var c in word) text.Append(c);
+                var segments = text.Segments();
+                if (segments.Any(s => s.IsChinese))
+                    chinese.Add(word + "\t" + string.Join(" | ", segments.Select(s => (s.IsChinese ? "ZH:" : s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
+            }
+            report.Append("# ").Append(name).Append(": ").Append(chinese.Count).Append(" / ").Append(all.Count).Append(" read as Chinese\n");
+            foreach (var line in chinese) report.Append(line).Append('\n');
+            Console.WriteLine($"{name}: {chinese.Count} / {all.Count} read as Chinese");
+        }
+        File.WriteAllText(output, report.ToString(), new UTF8Encoding(false));
+    }
+
     private static IEnumerable<string> EnglishWords() => Lines("english-words.txt").Where(w => w.All(char.IsAsciiLetterLower));
 
     private static IEnumerable<string> Lines(string name)
