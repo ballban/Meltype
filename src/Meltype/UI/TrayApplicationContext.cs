@@ -81,6 +81,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Learning = () => _engine.Settings.LearningEnabled,
             SeparateKeyRoles = () => _engine.Settings.SeparateKeyRoles,
             EnglishFirstInput = () => _engine.Settings.EnglishFirstInput,
+            CandidateFirstInput = () => _engine.Settings.CandidateFirstInput,
             ConsonantAbbreviations = () => _engine.Settings.ConsonantAbbreviations,
             CorrectTypos = () => _engine.Settings.CorrectTypos,
             SlashAsMiddleDot = () => _engine.Settings.SlashAsMiddleDot,

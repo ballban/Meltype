@@ -3,6 +3,7 @@
 
 using Meltype.Composition;
 using Meltype.Detection;
+using Meltype.Input;
 
 namespace Meltype.Tests;
 
@@ -15,6 +16,7 @@ internal static class ChineseTests
         {
             ["nihao"] = ["你好", "拟好"],
             ["jintiantianqihenhao"] = ["今天天气很好"],
+            ["maosuizijian"] = ["毛遂自荐"],
             ["women"] = ["我们"],
             ["danshi"] = ["但是", "单式"],
             ["hang"] = ["行", "航"],
@@ -143,7 +145,7 @@ internal static class ChineseTests
     });
 
     [Test]
-    public static void Chinese_ChoiceTeachesOnlyTheChineseEngine() => WithChinese(() =>
+    public static void Chinese_ChoiceTeachesChineseLanguagePriority() => WithChinese(() =>
     {
         var memory = new LanguageMemory(null);
         var history = new ConversionHistory(null);
@@ -153,8 +155,50 @@ internal static class ChineseTests
         k.Type("danshi  \n");
         Assert.Equal("但是", k.Host.Document);
         Assert.True(chinese.Learned().Contains(("danshi", "但是")), "the Chinese engine learns the choice");
+        Assert.Equal(true, memory.GetChinese("danshi"), "the Chinese language choice is remembered");
         Assert.Equal(null, memory.Get("danshi"), "not taught as Japanese or English");
         Assert.Equal(null, history.Get("だんし"), "not in the Japanese conversion history");
+
+        var next = new CompositionTests.Keyboard(history: history, languages: memory, chinese: new FakeChinese());
+        next.Type("danshi ");
+        Assert.Equal("但是", next.Host.View!.Clauses![0], "the remembered Chinese choice is first next time");
+    });
+
+    [Test]
+    public static void Chinese_CandidateFirstInputListsHanzi() => WithChinese(() =>
+    {
+        var k = new CompositionTests.Keyboard(chinese: new FakeChinese()) { CandidateFirstInput = true };
+        k.Type("nihao");
+        Assert.Equal("nihao", k.Showing, "the letters as typed");
+        var listed = k.Host.View!.Predictions ?? [];
+        Assert.True(listed.Take(3).SequenceEqual(["你好", "拟好", "nihao"]), string.Join(",", listed));
+        k.Type(" ");
+        Assert.Equal("你好", k.Host.Document, "Space commits the hanzi without a space");
+
+        // danshi reads Japanese without context, with the Chinese listed; choosing it teaches the Chinese engine
+        var chinese = new FakeChinese();
+        var memory = new LanguageMemory(null);
+        k = new CompositionTests.Keyboard(languages: memory, chinese: chinese) { CandidateFirstInput = true };
+        k.Type("danshi");
+        var index = k.Host.View!.Predictions!.ToList().IndexOf("但是");
+        Assert.True(index > 0, "但是 is listed after the Japanese: " + string.Join(",", k.Host.View.Predictions!));
+        for (var i = 0; i < index; i++) k.Press(VirtualKeys.Down);
+        k.Type(" ");
+        Assert.Equal("但是", k.Host.Document);
+        Assert.True(chinese.Learned().Contains(("danshi", "但是")), "the Chinese engine learns the choice");
+        Assert.Equal(true, memory.GetChinese("danshi"), "candidate-first Chinese choice is remembered");
+    });
+
+    [Test]
+    public static void Chinese_CompleteRimeWordsStayCandidatesWithoutDetectionWord() => WithChinese(() =>
+    {
+        var k = new CompositionTests.Keyboard(chinese: new FakeChinese());
+        k.Type("maosuizijian ");
+        Assert.True(k.Host.View!.Candidates.Contains("毛遂自荐"), string.Join(",", k.Host.View.Candidates));
+
+        k = new CompositionTests.Keyboard(chinese: new FakeChinese()) { CandidateFirstInput = true };
+        k.Type("maosuizijian");
+        Assert.True(k.Host.View!.Predictions!.Contains("毛遂自荐"), string.Join(",", k.Host.View.Predictions!));
     });
 
     [Test]

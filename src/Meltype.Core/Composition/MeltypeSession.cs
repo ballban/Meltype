@@ -246,6 +246,7 @@ public sealed class MeltypeSession
             Learning = () => settings.LearningEnabled,
             SeparateKeyRoles = () => settings.SeparateKeyRoles,
             EnglishFirstInput = () => settings.EnglishFirstInput,
+            CandidateFirstInput = () => settings.CandidateFirstInput,
             ConsonantAbbreviations = () => settings.ConsonantAbbreviations,
             CandidateMeanings = () => settings.ShowCandidateMeanings,
             CorrectTypos = () => settings.CorrectTypos,

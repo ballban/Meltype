@@ -29,6 +29,7 @@ internal static class MemoryPersistenceTests
             Assert.Equal(2, translations.Get("すし").Single().Count);
 
             languages.Remember("cafe", english: false, explicitChoice: true);
+            languages.RememberChinese("nihao");
             conversions.Remember("くらいど", "クラウド");
             translations.Remember("すし", "sushi");
 
@@ -36,6 +37,8 @@ internal static class MemoryPersistenceTests
             var restoredConversions = new ConversionHistory(conversionsPath);
             Assert.Equal(true, restoredLanguages.Get("sushi"));
             Assert.Equal(false, restoredLanguages.Get("cafe"));
+            Assert.Equal(true, restoredLanguages.GetChinese("nihao"));
+            Assert.Equal(null, restoredLanguages.Get("nihao"));
             Assert.Equal("鮨", restoredConversions.Get("すし"));
             Assert.Equal("クラウド", restoredConversions.Get("くらいど"));
             Assert.Equal(3, new TranslationHistory(translationsPath).Get("すし").Single().Count);

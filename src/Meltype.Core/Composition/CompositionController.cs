@@ -192,6 +192,12 @@ public sealed record CompositionOptions
     /// <summary>設定「英字を主に入力」: 自動判定をせず英字のまま入力中にし、変換キー / ↓ で日本語にする (issue #839)。</summary>
     public Func<bool> EnglishFirstInput { get; init; } = () => false;
 
+    /// <summary>
+    /// Setting: while typing, show the typed letters and keep a whole-input candidate list open, with the automatic result first.
+    /// Space commits the selected candidate, Enter the letters.
+    /// </summary>
+    public Func<bool> CandidateFirstInput { get; init; } = () => false;
+
     /// <summary>設定「子音の略入力を候補に出す」: ast → 明日 (issue #62)。</summary>
     public Func<bool> ConsonantAbbreviations { get; init; } = () => false;
 
@@ -367,6 +373,23 @@ public sealed class CompositionController
     /// </summary>
     private sealed record Prediction(string Text, string Before, string Reading);
 
+    // Candidate-first input (setting): the whole-input candidates shown while typing, the input and context they were built for, and the one selected
+    private FirstCandidates? _first;
+    private string _firstKey = "";
+    private string _firstTyped = "";
+    private int _firstIndex;
+
+    /// <summary>
+    /// What candidate-first input lists: the whole input as one clause, then predictions. When Automatic, the first candidate is what Space
+    /// does without the list (commit English with a space, or the conversion), and it commits that way instead of through the clause.
+    /// </summary>
+    private sealed record FirstCandidates(Clause Clause, bool Automatic, IReadOnlyList<Prediction> Predictions)
+    {
+        public int Count => Clause.Candidates.Count + Predictions.Count;
+
+        public List<string> Texts() => [.. Clause.Candidates, .. Predictions.Select(p => p.Before + p.Text)];
+    }
+
     // 英数状態で判定中の語。打鍵はすぐアプリに送り (待たせない)、ローマ字と分かったら消して変換ボックスに入れ直す。
     private readonly StringBuilder _heldLetters = new();
     private int _heldSent;
@@ -398,6 +421,9 @@ public sealed class CompositionController
 
         /// <summary>英語の文節を、打った英字をローマ字として読んだかな (thin → てぃん)。文節の区切りを動かすときに日本語の文節として読み直すのに使う。</summary>
         public string? Kana { get; set; }
+
+        /// <summary>この文節が「入力中は英字のまま表示し、候補を常に出す」の一覧から作られたか。</summary>
+        public bool IsCandidateFirst { get; set; }
 
         /// <summary>候補のうち英訳 (複雑な → complex) のもの。</summary>
         public HashSet<string> Translations { get; } = new(StringComparer.Ordinal);
@@ -495,6 +521,13 @@ public sealed class CompositionController
     /// <summary>変換中の文節の候補を番号で選ぶ (Mac の候補ウィンドウをクリックしたときなど)。</summary>
     public void SelectCandidate(int index)
     {
+        // Candidate-first input: picking from the list only selects; Space commits it
+        if (CurrentFirst() is { } first)
+        {
+            if (index >= 0 && index < first.Count) _firstIndex = index;
+            UpdateView();
+            return;
+        }
         // 入力中に出した候補 (設定「入力中も変換候補をいくつか表示」) をクリックしたら、変換を始めてからその候補を選ぶ
         // 入力中の候補は読み全体の候補なので、変換を始めて文節に分かれると一覧が変わり、番号が別の語を指す。
         // 見えていた一覧のまま、読み全体 1 つの文節にして、クリックした語を選ぶ
@@ -517,6 +550,13 @@ public sealed class CompositionController
     public void CommitPredictionAt(int index)
     {
         if (_converting) return;
+        // Candidate-first input lists its candidates where predictions go (Meltype IME): clicking one commits it
+        if (CurrentFirst() is not null)
+        {
+            CommitFirst(index, space: false);
+            UpdateView();
+            return;
+        }
         var predictions = CurrentPredictions();
         if (index < 0 || index >= predictions.Count) return;
         CommitPrediction(predictions[index]);
@@ -805,6 +845,10 @@ public sealed class CompositionController
                 _text.FixTypos();
                 StartConversion(preferJapanese: true);
                 return;
+            case VirtualKeys.Return when CandidateFirst():
+                // Candidate-first input: Enter keeps the typed letters as shown; Space commits the candidate
+                Commit();
+                return;
             case VirtualKeys.Return when SelectedPrediction() is { } prediction:
                 // 予測変換の候補を選んでいれば、それを確定する。
                 CommitPrediction(prediction);
@@ -820,6 +864,9 @@ public sealed class CompositionController
                 _text.FixTypos();
                 _spaceStartedConversion = true;
                 StartConversion(preferJapanese: true);
+                return;
+            case VirtualKeys.Space when CandidateFirst():
+                CommitFirst(_firstIndex, space: true);
                 return;
             case VirtualKeys.Space when _options.SeparateKeyRoles() && !IsProtectedInput:
                 // 設定「入力中のキーの役割を分ける」: Space は英語・日本語の判定にかかわらず候補を開く (英字のまま確定して空白を入れない)。
@@ -873,6 +920,10 @@ public sealed class CompositionController
                 _predictionKey = "\u0000"; // 候補を作り直す
                 _predictionIndex = -1;
                 return;
+            case VirtualKeys.Escape when CandidateFirst():
+                // The letters are already shown as typed, so there is no step back to take
+                _text.Clear();
+                return;
             case VirtualKeys.Escape when _predictionIndex >= 0:
                 // 予測の候補を選んでいたら、選ぶのをやめるだけ (打った内容は残す)。
                 _predictionIndex = -1;
@@ -889,6 +940,12 @@ public sealed class CompositionController
             case VirtualKeys.Tab when _text.Suggestion() is not null:
                 // 判定の強さが手動: 提案どおり英字にする。
                 _text.LevelOverride = DetectionLevel.Balanced;
+                return;
+            case VirtualKeys.Tab when CandidateFirst() && CurrentFirst() is { Count: > 1 }:
+                MoveFirst(_swallowedShift.Count > 0 || _host.IsShiftDown() ? -1 : 1);
+                return;
+            case VirtualKeys.Down or VirtualKeys.Up when CandidateFirst() && CurrentFirst() is { Count: > 1 }:
+                MoveFirst(vk == VirtualKeys.Up ? -1 : 1);
                 return;
             case VirtualKeys.Tab when CurrentPredictions().Count > 0:
                 // 予測変換の候補を選ぶ (Tab で次、Shift+Tab で前。最後の次は選ばない状態に戻る)。
@@ -1673,15 +1730,7 @@ public sealed class CompositionController
         // 区間に分けずに 1 つの文節にして、その語を候補の先頭にする。ローマ字として読めれば、その読みの漢字も出す (go → 後・語・碁)
         if (HasRegisteredReading())
         {
-            var typedRaw = _text.Raw;
-            var lower = typedRaw.ToLowerInvariant();
-            List<string> registered = [.. _options.UserDictionary?.Lookup(lower) ?? [], .. _options.ConsonantAbbreviations() ? _options.Candidates?.Lookup(lower) ?? [] : []];
-            var reading = RomajiReading(typedRaw);
-            List<string> romaji = reading is null ? [] : JapaneseCandidates(reading, null);
-            List<string> english = [typedRaw, .. EnglishCandidates(typedRaw)];
-            _clauses = [new Clause(typedRaw, true, preferJapanese
-                ? Distinct([.. registered, .. romaji, .. english])
-                : Distinct([.. registered, .. english, .. romaji])) { Raw = typedRaw, Kana = reading }];
+            _clauses = [RegisteredClause(preferJapanese)];
             _selectedClause = 0;
             _converting = true;
             return;
@@ -1770,7 +1819,7 @@ public sealed class CompositionController
                 var englishClause = new Clause(segment.Raw, true, preferJapanese && romaji.Count > 0
                     ? Distinct([.. romaji, .. english])
                     : Distinct([.. english, .. romaji, .. NumberCandidates.For(segment.Raw)]))
-                { Kana = _text.KanaForSegment(s) };
+                { Raw = segment.Raw, Kana = _text.KanaForSegment(s) };
                 AddChineseCandidates(englishClause, segment.Raw);
                 clauses.Add(englishClause);
                 continue;
@@ -1794,6 +1843,11 @@ public sealed class CompositionController
             clauses.AddRange(japanese);
         }
         if (clauses.Count == 0) return;
+        // A remembered language choice takes precedence over the detector for the next automatic conversion.
+        // Convert / Shift+Space are explicit Japanese requests and keep their existing override behavior.
+        if (!preferJapanese)
+            foreach (var clause in clauses)
+                if (clause.Raw is { } raw) PreferLearnedLanguage(clause, raw);
         // 変換したあとに続けて打っていたら、前に選んでいた候補を同じ読みの文節で使う
         foreach (var clause in clauses)
             if (_keptChoices.TryGetValue(clause.Reading, out var kept) && clause.Candidates.Contains(kept)) Prefer(clause, kept);
@@ -1802,6 +1856,176 @@ public sealed class CompositionController
         _clauses = clauses;
         _selectedClause = 0;
         _converting = true;
+    }
+
+    /// <summary>
+    /// The typed letters as one clause headed by the words registered for them. Read as romaji, they also give the kanji of that reading (go → 後・語・碁).
+    /// </summary>
+    private Clause RegisteredClause(bool preferJapanese)
+    {
+        var typedRaw = _text.Raw;
+        var lower = typedRaw.ToLowerInvariant();
+        List<string> registered = [.. _options.UserDictionary?.Lookup(lower) ?? [], .. _options.ConsonantAbbreviations() ? _options.Candidates?.Lookup(lower) ?? [] : []];
+        var reading = RomajiReading(typedRaw);
+        List<string> romaji = reading is null ? [] : JapaneseCandidates(reading, null);
+        List<string> english = [typedRaw, .. EnglishCandidates(typedRaw)];
+        var candidates = preferJapanese
+            ? Distinct([.. registered, .. romaji, .. english])
+            : Distinct([.. registered, .. english, .. romaji]);
+        return new Clause(typedRaw, true, candidates) { Raw = typedRaw, Kana = reading };
+    }
+
+    /// <summary>Candidate-first input applies: letters typed for the automatic detection, with nothing converting, protected, or set by F6〜F10.</summary>
+    private bool CandidateFirst() =>
+        _options.CandidateFirstInput() && !_converting && _reconversion is null && _text.Mode == DisplayMode.Auto && !_text.KanaInput &&
+        !_text.IsEmpty && _text.Raw.Any(char.IsAsciiLetter) && _text.ProtectedSpans().Count == 0;
+
+    /// <summary>
+    /// Candidate-first input: the whole-input candidates, built lazily so keys handled in one batch act on the input they follow.
+    /// A new input selects the first candidate again; a new context (the text around the caret arriving) keeps the selection.
+    /// </summary>
+    private FirstCandidates? CurrentFirst()
+    {
+        if (!CandidateFirst()) return null;
+        var typed = $"{_compositionId}\u0001{_text.Raw}";
+        if (typed != _firstTyped)
+        {
+            _firstTyped = typed;
+            _firstIndex = 0;
+        }
+        var key = string.Join("\u0001", typed, _text.LevelOverride, _text.PrecedingEnglish, _text.PrecedingChinese, _precedingText, _followingText, _options.History?.Version);
+        if (key != _firstKey || _first is null)
+        {
+            _firstKey = key;
+            _first = BuildFirst();
+        }
+        _firstIndex = Math.Clamp(_firstIndex, 0, _first.Count - 1);
+        return _first;
+    }
+
+    private FirstCandidates BuildFirst()
+    {
+        var raw = _text.Raw;
+        Clause clause;
+        var automatic = true;
+        if (HasRegisteredReading())
+        {
+            // The registered word is what Space converts to; committing it through the clause is the same as Space then Enter
+            clause = RegisteredClause(preferJapanese: false);
+            automatic = false;
+        }
+        else
+        {
+            var (first, english, _) = AutomaticCandidate();
+            var segments = _text.Segments();
+            if (segments.All(s => s.IsKorean))
+            {
+                var reading = RomajiReading(raw);
+                clause = new Clause(raw, true, Distinct([first, raw, .. reading is null ? [] : TypingJapanese(reading)])) { Kana = reading, IsKorean = true };
+            }
+            else if (segments.All(s => s.IsChinese))
+            {
+                // The order Space gives a Chinese clause. The first hanzi commits through the clause so the Chinese engine learns it
+                var hanzi = ChineseCandidates(raw, CandidatePageSize);
+                var reading = RomajiReading(raw);
+                List<string> romaji = reading is null ? [] : TypingJapanese(reading);
+                List<string> ordered = hanzi.Count > 0 && _detector.IsCommonJapanese?.Invoke(raw) == true
+                    ? [first, hanzi[0], .. romaji.Take(2), .. hanzi.Skip(1), raw, .. romaji.Skip(2)]
+                    : [first, .. hanzi, raw, .. romaji];
+                clause = new Clause(raw, true, Distinct([.. ordered])) { Raw = raw, Kana = reading, IsChinese = true };
+                clause.ChineseCandidates.UnionWith(hanzi);
+                automatic = !hanzi.Contains(first);
+            }
+            else if (english && first.All(c => c < 0x80))
+            {
+                var reading = RomajiReading(raw);
+                clause = new Clause(raw, true, Distinct([first, .. EnglishCandidates(raw), .. reading is null ? [] : TypingJapanese(reading)])) { Kana = reading };
+                AddChineseCandidates(clause, raw);
+            }
+            else if (!english && segments.All(s => !s.IsEnglish && !s.IsOtherLanguage && !s.IsChinesePunctuation))
+            {
+                var reading = _text.AllKana(final: true);
+                clause = new Clause(reading, false, TypingJapanese(reading, first)) { Raw = raw };
+                AddRawCandidates(clause);
+                MoveEmojiLast(clause);
+                AddChineseCandidates(clause, raw);
+            }
+            // Japanese with English, or with Chinese punctuation: the result as a whole, or the letters
+            else clause = new Clause(raw, true, Distinct(first, raw));
+        }
+        var automaticText = clause.Text;
+        clause.IsCandidateFirst = true;
+        if (automatic && PreferLearnedLanguage(clause, raw) && clause.Text != automaticText) automatic = false;
+        var predictions = MisspellingSuggestion() is null && _text.Suggestion() is null ? CurrentPredictions() : [];
+        var limit = CandidatePageSize - Math.Min(predictions.Count, 3);
+        if (clause.Candidates.Count > limit)
+        {
+            var kept = clause.Candidates.Take(limit).ToList();
+            // Keep the typed letters in view: choosing them is how a word read as another language stays in letters
+            if (clause.Candidates.Contains(raw) && !kept.Contains(raw)) kept[^1] = raw;
+            clause.Candidates = kept;
+        }
+        var shown = predictions.Where(p => !clause.Candidates.Contains(p.Before + p.Text)).Take(CandidatePageSize - clause.Candidates.Count).ToList();
+        return new FirstCandidates(clause, automatic, shown);
+    }
+
+    /// <summary>
+    /// Candidate-first input: the first candidate, which is what Space does without the list. English when Space would commit the word with a space
+    /// (ViaCommit when that goes through Commit), otherwise the conversion of the whole input.
+    /// </summary>
+    private (string Text, bool English, bool ViaCommit) AutomaticCandidate()
+    {
+        if (SpaceCommitsAlphanumeric()) return (ShownCommitText(fixEnglish: true), true, true);
+        if (EndsWithEnglish()) return (FixEnglishTypo(_text.RenderSegments(final: true, Convert, LiveChinese)), true, false);
+        if (SpaceCommitsAutoEnglish()) return (FixEnglishTypo(_text.Raw), true, false);
+        return (ShownCommitText(fixEnglish: false), false, true);
+    }
+
+    /// <summary>Japanese candidates for a reading on every key: from the engine's conversion without Zenzai, which would make each key wait.</summary>
+    private List<string> TypingJapanese(string reading, string? first = null) => JapaneseCandidates(reading, first ?? Standalone(reading));
+
+    private void MoveFirst(int step)
+    {
+        if (CurrentFirst() is not { Count: > 0 } first) return;
+        _firstIndex = (_firstIndex + step + first.Count) % first.Count;
+    }
+
+    /// <summary>
+    /// Candidate-first input: commits the candidate at index. Letters chosen with Space get a space after them, as Space commits English.
+    /// Choosing another than the first teaches the choice the way choosing it in the conversion does (the letters of a Japanese word → English next time).
+    /// </summary>
+    private void CommitFirst(int index, bool space)
+    {
+        if (CurrentFirst() is not { } first || index < 0 || index >= first.Count) return;
+        var clause = first.Clause;
+        string SpaceAfter(string text) => space && text.Any(char.IsAsciiLetter) && text.All(c => c < 0x80) ? " " : "";
+        if (index == 0 && first.Automatic)
+        {
+            // The same fix Space makes before deciding (onegaishimsu → お願いします)
+            if (space) _text.FixTypos();
+            var (text, english, viaCommit) = AutomaticCandidate();
+            var suffix = space ? " " : "";
+            if (!english)
+            {
+                _spaceStartedConversion = space;
+                Commit(automatic: true);
+            }
+            else if (viaCommit) Commit(suffix, fixEnglish: true, automatic: true);
+            else CommitText(text + suffix, english: true, _text.Raw);
+            return;
+        }
+        if (index >= clause.Candidates.Count)
+        {
+            var prediction = first.Predictions[index - clause.Candidates.Count];
+            CommitPrediction(prediction, SpaceAfter(prediction.Before + prediction.Text));
+            return;
+        }
+        clause.Index = index;
+        clause.Changed = index > 0;
+        _clauses = [clause];
+        _selectedClause = 0;
+        _converting = true;
+        Commit(SpaceAfter(clause.Text));
     }
 
     /// <summary>
@@ -2539,7 +2763,7 @@ public sealed class CompositionController
 
     /// <summary>The Chinese converter's candidates for the whole pinyin, or none when Chinese input is off or the engine is not ready.</summary>
     private IReadOnlyList<string> ChineseCandidates(string pinyin, int max) =>
-        _detector.ChineseInput && _options.Chinese is { IsReady: true } chinese ? chinese.Candidates(pinyin, max) : [];
+        _detector.ChineseInput && _options.Chinese is { IsReady: true } chinese ? chinese.Candidates(pinyin.ToLowerInvariant(), max) : [];
 
     /// <summary>The first Chinese candidate for the pinyin, or the pinyin itself without one.</summary>
     private string ChineseText(string pinyin) => ChineseCandidates(pinyin, 1) is [var first, ..] ? first : pinyin;
@@ -2565,18 +2789,42 @@ public sealed class CompositionController
     private readonly Dictionary<string, string> _liveChineseCache = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// A Japanese or English clause whose letters are a listed Chinese word (danshi → 男子 also reads 但是) shows the Chinese right after
+    /// A Japanese or English clause whose letters can be converted as pinyin (danshi → 男子 also reads 但是) shows the Chinese right after
     /// its first candidate, so either language is one key away whichever way the detection went.
     /// </summary>
     private void AddChineseCandidates(Clause clause, string raw)
     {
-        if (!_detector.ChineseInput || raw.Length < 2 || Pinyin.Word(raw) is null) return;
-        var hanzi = ChineseCandidates(raw, ChineseCandidatesInOtherClause).Where(c => !clause.Candidates.Contains(c)).ToList();
+        if (!_detector.ChineseInput || raw.Length < 2 || !raw.All(char.IsAsciiLetter)) return;
+        var pinyin = raw.ToLowerInvariant();
+        var hanzi = ChineseCandidates(pinyin, ChineseCandidatesInOtherClause).Where(c => !clause.Candidates.Contains(c)).ToList();
         if (hanzi.Count == 0) return;
         var current = clause.Text;
         clause.Candidates.InsertRange(Math.Min(1, clause.Candidates.Count), hanzi);
         clause.ChineseCandidates.UnionWith(hanzi);
         clause.Index = Math.Max(0, clause.Candidates.IndexOf(current));
+    }
+
+    /// <summary>Apply a remembered Chinese, English, or Japanese choice to a clause when that language has a candidate.</summary>
+    private bool PreferLearnedLanguage(Clause clause, string raw)
+    {
+        if (_options.Languages is not { } languages || raw.Length < 2 || !raw.All(char.IsAsciiLetter)) return false;
+        var word = raw.ToLowerInvariant();
+        if (languages.GetChinese(word) == true)
+        {
+            var chinese = clause.Candidates.FirstOrDefault(candidate => clause.ChineseCandidates.Contains(candidate));
+            if (chinese is not null)
+            {
+                Prefer(clause, chinese);
+                return true;
+            }
+        }
+        if (languages.Get(word) is not bool english) return false;
+        var preferred = english
+            ? clause.Candidates.FirstOrDefault(candidate => candidate == raw)
+            : clause.Candidates.FirstOrDefault(candidate => !clause.ChineseCandidates.Contains(candidate) && IsJapaneseText(candidate));
+        if (preferred is null) return false;
+        Prefer(clause, preferred);
+        return true;
     }
 
     private static List<string> Distinct(params string?[] candidates)
@@ -2795,8 +3043,10 @@ public sealed class CompositionController
     }
 
     /// <summary>今の表示 (ライブ変換が有効なら日本語区間は漢字に変換済み)。</summary>
-    private string CurrentDisplay(bool final) =>
-        _text.Display(final, _options.LiveConversion() ? LiveConvert : null, _options.LiveConversion() ? LiveChinese : null);
+    /// <remarks>Candidate-first input shows the typed letters itself; this is then the first candidate, converted the way Space converts even when short (kawa → 川).</remarks>
+    private string CurrentDisplay(bool final) => CandidateFirst()
+        ? _text.Display(final, kana => string.Concat(LiveClauses(kana).Select(c => c.Text)), LiveChinese)
+        : _text.Display(final, _options.LiveConversion() ? LiveConvert : null, _options.LiveConversion() ? LiveChinese : null);
 
     // ---- 確定 ----
 
@@ -2808,29 +3058,21 @@ public sealed class CompositionController
     /// <summary>今の未確定入力が、自動では変換してはいけない保護区間か (F9/F10 などの明示指定は除く)。</summary>
     private bool IsProtectedInput => !_converting && _text.Mode == DisplayMode.Auto && _text.HasProtectedTail;
 
-    private void Commit(string suffix = "", bool fixEnglish = false, bool preserveText = false)
+    private void Commit(string suffix = "", bool fixEnglish = false, bool preserveText = false, bool automatic = false)
     {
         if (IsProtectedInput)
         {
             CommitProtected(suffix);
             return;
         }
+        // Candidate-first input shows the typed letters, so committing without choosing a candidate (Enter, focus moving away) commits them
+        if (!automatic && CandidateFirst())
+        {
+            CommitText(_text.Raw + suffix, english: true, _text.Raw, chosen: true, preserveText);
+            return;
+        }
         var converting = _converting && _clauses.Count > 0;
-        var text = converting ? string.Concat(_clauses.Select(c => c.Text)) : CurrentDisplay(final: true);
-        // 英語の文脈で英字だけに見えていた入力 (hello mata) は、確定するときに判定し直してかなにしない: 見えているとおりに確定する (issue #127)。
-        // 文脈がない単独の語 (mine → みね) は、今までどおり確定時の判定に任せる
-        if (!converting && _text.Mode == DisplayMode.Auto && !_text.KanaInput && _text.PrecedingEnglish == true && CurrentDisplay(final: false) is { Length: > 0 } shown &&
-            shown.All(char.IsAsciiLetter) && shown != text && text.Any(c => c > 0x7F))
-        {
-            text = shown;
-        }
-        // 設定「Enter は見えているとおりに確定」: かな + 語末の n (かんたn) は、確定でライブ変換が漢字にせず、見えていたかなに n を ん にしただけで確定する (issue #677)
-        if (!converting && _options.EnterCommitsAsShown() && _text.Mode == DisplayMode.Auto && _text.Pending == "n" &&
-            CurrentDisplay(final: false) is { Length: > 1 } shownKana && shownKana[^1] == 'n' && shownKana[^2] is >= '\u3041' and <= '\u3096')
-        {
-            text = shownKana[..^1] + "ん";
-        }
-        if (fixEnglish && !converting && _text.Mode == DisplayMode.Auto) text = FixEnglishTypo(text);
+        var text = converting ? string.Concat(_clauses.Select(c => c.Text)) : ShownCommitText(fixEnglish);
         var english = converting ? _clauses.All(c => c.IsEnglish && !c.ChoseChinese) : _text.IsAlphanumericAt(final: true);
         // Ending with Chinese makes the next word read Chinese first (women → 我们 after 你好). Chinese punctuation after it (你好，) keeps that
         var chinese = converting
@@ -2857,6 +3099,29 @@ public sealed class CompositionController
         CommitText(text + suffix, english, _text.Raw, chosen, preserveText, chinese);
     }
 
+    /// <summary>What committing the input without a conversion gives: what is shown, decided as final.</summary>
+    private string ShownCommitText(bool fixEnglish)
+    {
+        var text = CurrentDisplay(final: true);
+        // Candidate-first input shows the letters, not this: the tweaks to keep what was shown do not apply
+        var shownInput = !CandidateFirst();
+        // 英語の文脈で英字だけに見えていた入力 (hello mata) は、確定するときに判定し直してかなにしない: 見えているとおりに確定する (issue #127)。
+        // 文脈がない単独の語 (mine → みね) は、今までどおり確定時の判定に任せる
+        if (shownInput && _text.Mode == DisplayMode.Auto && !_text.KanaInput && _text.PrecedingEnglish == true && CurrentDisplay(final: false) is { Length: > 0 } shown &&
+            shown.All(char.IsAsciiLetter) && shown != text && text.Any(c => c > 0x7F))
+        {
+            text = shown;
+        }
+        // 設定「Enter は見えているとおりに確定」: かな + 語末の n (かんたn) は、確定でライブ変換が漢字にせず、見えていたかなに n を ん にしただけで確定する (issue #677)
+        if (shownInput && _options.EnterCommitsAsShown() && _text.Mode == DisplayMode.Auto && _text.Pending == "n" &&
+            CurrentDisplay(final: false) is { Length: > 1 } shownKana && shownKana[^1] == 'n' && shownKana[^2] is >= '\u3041' and <= '\u3096')
+        {
+            text = shownKana[..^1] + "ん";
+        }
+        if (fixEnglish && _text.Mode == DisplayMode.Auto) text = FixEnglishTypo(text);
+        return text;
+    }
+
     /// <summary>
     /// ユーザーが自動の判定を自分で直して確定したとき (F6〜F10 で英字 / かなにした、変換の候補から打ったままの英字・日本語を選んだ)。
     /// 誤判定の報告 (トレイの「直した誤判定を報告...」) に使う。記録を作るだけで、どこにも送らない (issue #284)。
@@ -2869,7 +3134,7 @@ public sealed class CompositionController
         string shown;
         if (converting)
         {
-            // 英語 / 日本語を選び直した文節があるときだけ (漢字の選び直しは判定の間違いではない)。Choosing between Chinese and another language counts too
+            // 英語・日本語・中国語を選び直した文節があるときだけ (漢字の候補内の選び直しは判定の間違いではない)。
             var switched = _clauses.Any(c => c.Changed && (c.IsChinese || c.ChoseChinese
                 ? c.IsChinese != c.ChoseChinese
                 : c.IsEnglish ? IsJapaneseText(c.Text) : c.Raw is { } raw && c.Text == raw));
@@ -2914,7 +3179,7 @@ public sealed class CompositionController
     }
 
     /// <summary>予測変換の候補を確定する。日本語なら覚え直して、次からより前に出す。</summary>
-    private void CommitPrediction(Prediction prediction)
+    private void CommitPrediction(Prediction prediction, string suffix = "")
     {
         _predictionIndex = -1;
         if (!prediction.Text.All(c => c < 0x80) && _options.Learning())
@@ -2922,7 +3187,7 @@ public sealed class CompositionController
         // 最後の文節の続きの候補なら、前の文節 (見えているとおり) とつなげて確定する
         var text = prediction.Before + prediction.Text;
         var english = text.All(c => c < 0x80);
-        CommitText(text, english, english ? text : _text.Raw, chosen: true);
+        CommitText(text + suffix, english, english ? text : _text.Raw, chosen: true);
     }
 
     /// <summary>予測の候補の読み (前に確定したときの読み)。分からなければ打ちかけの読み。</summary>
@@ -3065,21 +3330,33 @@ public sealed class CompositionController
         // 設定「ユーザー学習を使う」が OFF なら、新しく覚えない (issue #277)
         if (!_options.Learning()) return;
         // 変換の候補から打ったままの英字 (api) を選んで確定したら、その語は次から英字にする (F10 と同じ)。
-        foreach (var clause in _clauses.Where(c => !c.IsEnglish && !c.IsChinesePunctuation && c.Changed && c.Raw is { } raw && c.Text == raw))
+        foreach (var clause in _clauses.Where(c => !c.IsCandidateFirst && !c.IsEnglish && !c.IsChinesePunctuation && c.Changed && c.Raw is { } raw && c.Text == raw))
         {
             _options.Languages?.Remember(clause.Raw!, english: true);
         }
         // Choosing the typed keys over the Hangul or the Chinese keeps those keys English next time
-        foreach (var clause in _clauses.Where(c => (c.IsKorean || c.IsChinese) && c.Changed && c.Text == c.Reading && c.Reading.All(char.IsAsciiLetter)))
+        foreach (var clause in _clauses.Where(c => !c.IsCandidateFirst && (c.IsKorean || c.IsChinese) && c.Changed && c.Text == c.Reading && c.Reading.All(char.IsAsciiLetter)))
         {
             _options.Languages?.Remember(clause.Reading, english: true);
         }
         // 英語と判定した語で日本語の候補 (go → 語) を選んだら、その語は次から日本語にする (F6 と同じ)。
-        foreach (var clause in _clauses.Where(c => c.IsEnglish && !c.ChoseChinese && IsJapaneseText(c.Text) && c.Reading.All(char.IsAsciiLetter)))
+        foreach (var clause in _clauses.Where(c => !c.IsCandidateFirst && c.IsEnglish && !c.ChoseChinese && IsJapaneseText(c.Text) && c.Reading.All(char.IsAsciiLetter)))
         {
             _options.Languages?.Remember(clause.Reading, english: false);
         }
-        // Chinese goes to the Chinese engine only, never to the Japanese history or the language memory
+        // Choosing a Chinese candidate makes Chinese the preferred language for this pinyin.
+        foreach (var clause in _clauses.Where(c => !c.IsCandidateFirst && c.ChoseChinese && c.Changed && c.Raw is { } raw && raw.All(char.IsAsciiLetter)))
+        {
+            _options.Languages?.RememberChinese(clause.Raw!);
+        }
+        // Candidate-first input presents all three languages together, so the selected candidate teaches its language.
+        foreach (var clause in _clauses.Where(c => c.IsCandidateFirst && c.Changed && c.Raw is { } raw && raw.All(char.IsAsciiLetter)))
+        {
+            if (clause.ChoseChinese) _options.Languages?.RememberChinese(clause.Raw!);
+            else if (clause.Text == clause.Raw) _options.Languages?.Remember(clause.Raw!, english: true);
+            else if (IsJapaneseText(clause.Text)) _options.Languages?.Remember(clause.Raw!, english: false);
+        }
+        // Chinese goes to the Chinese engine and language memory, never to the Japanese conversion history
         if (_options.Chinese is { IsReady: true } chineseEngine)
         {
             foreach (var clause in _clauses.Where(c => c.ChoseChinese && c.Raw is not null))
@@ -3288,6 +3565,17 @@ public sealed class CompositionController
                 MisspellingSuggestion(),
                 Typed: TypedKeys(),
                 Committed: string.Concat(_clauses.Select(c => c.Text)), ContextHint: zenzai ? "Zenzai" : null));
+        }
+        else if (CurrentFirst() is { } first)
+        {
+            // Candidate-first input: the letters as typed, and the candidates where predictions go (the IME window draws those while typing)
+            var texts = first.Texts();
+            var suggestion = _text.Suggestion();
+            var contextHint = suggestion is null ? null : $"Tab → {suggestion} (英字に)";
+            var hint = "Space 確定　Enter 英字のまま　Tab/↓ 次の候補　変換 文節ごとに変換";
+            if (contextHint is not null) hint = contextHint + "　" + hint;
+            _host.Show(new CompositionView(_text.Raw, texts, _firstIndex, false, hint, Suggestion: MisspellingSuggestion(),
+                Predictions: texts, SelectedPrediction: _firstIndex, Typed: TypedKeys(), Committed: _text.Raw, ContextHint: contextHint));
         }
         else
         {

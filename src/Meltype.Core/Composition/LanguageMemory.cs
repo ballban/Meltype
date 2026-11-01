@@ -6,9 +6,9 @@ using System.Text.Json;
 namespace Meltype.Composition;
 
 /// <summary>
-/// 英語とも日本語とも読める語 (api, sushi …) を、ユーザーが自分で英字 / かなに直したときに覚えておく。
+/// 英語・日本語・中国語とも読める語 (api, sushi, danshi …) を、ユーザーが自分で選んだ言語として覚えておく。
 /// 次からその語は、自動の判定より覚えた方を優先する (api と打って F10 で英字にして確定 → 次から api は英字)。
-/// %LOCALAPPDATA%\Meltype\languages.json に「打った英字 → 英語か」だけを保存する。
+/// %LOCALAPPDATA%\Meltype\languages.json に、打った英字と選んだ言語を保存する。
 /// </summary>
 public sealed class LanguageMemory
 {
@@ -22,6 +22,7 @@ public sealed class LanguageMemory
     internal sealed class Entry
     {
         public bool English { get; set; }
+        public bool Chinese { get; set; }
         public DateTime Used { get; set; }
 
         /// <summary>同じ向きに直した回数 (前の版で保存したものは 0 = 1 回)。</summary>
@@ -34,6 +35,9 @@ public sealed class LanguageMemory
     /// <summary>学習した語 (設定の「学習した語」の一覧に出す)。Active は今有効になっているか (2 回目を待っている語は false)。</summary>
     public sealed record Learned(string Word, bool English, int Count, DateTime Used, bool Active, string? Key = null, string? Context = null)
     {
+        /// <summary>中国語として覚えた語か。旧版のデータでは false。</summary>
+        public bool Chinese { get; init; }
+
         /// <summary>Remove に渡す名前 (文脈ごとに分けて覚えた語は、印 @e / @j 付き)。</summary>
         public string EntryKey => Key ?? Word;
     }
@@ -59,7 +63,7 @@ public sealed class LanguageMemory
     {
         _saver = new DeferredSaver(Write);
         _path = path;
-        Config.DataFile.Load(path, "英語 / 日本語の学習データ", content =>
+        Config.DataFile.Load(path, "英語 / 日本語 / 中国語の学習データ", content =>
         {
             var loaded = JsonSerializer.Deserialize(content, Config.LearningJsonContext.Default.Languages);
             if (loaded is not null) foreach (var (word, entry) in loaded) _entries[word] = entry;
@@ -68,7 +72,7 @@ public sealed class LanguageMemory
 
     public int Count => _entries.Count;
 
-    /// <summary>学習を前の文脈 (英語の後か日本語の後か) ごとに分けるか (設定「英語 / 日本語の学習を前の文脈ごとに分ける」: issue #491)。</summary>
+    /// <summary>学習を前の文脈 (英語の後か日本語の後か) ごとに分けるか (設定「英語 / 日本語 / 中国語の学習を前の文脈ごとに分ける」: issue #491)。</summary>
     public bool ContextSensitive { get; set; }
 
     /// <summary>今の入力の前が英語か (true)、日本語か (false)、分からないか (null)。</summary>
@@ -80,13 +84,13 @@ public sealed class LanguageMemory
     /// <summary>覚えている内容が変わるたびに増える (判定の結果を使い回してよいかを見るのに使う)。</summary>
     public int Version { get; private set; }
 
-    /// <summary>覚えている語なら英語か (true) 日本語か (false)。覚えていなければ null。word は小文字の英字。</summary>
+    /// <summary>覚えている語なら英語か (true) 日本語か (false)。中国語として覚えた語は null。覚えていなければ null。word は小文字の英字。</summary>
     public bool? Get(string word)
     {
         if (ContextSuffix is { Length: > 0 } suffix && _entries.TryGetValue(word + suffix, out var contextual))
-            return NeedsTwice(word, contextual) ? null : contextual.English;
+            return contextual.Chinese || NeedsTwice(word, contextual) ? null : contextual.English;
         if (!_entries.TryGetValue(word, out var entry)) return null;
-        if (NeedsTwice(word, entry)) return null;
+        if (entry.Chinese || NeedsTwice(word, entry)) return null;
         return entry.English;
     }
 
@@ -94,8 +98,16 @@ public sealed class LanguageMemory
     {
         if (ContextSuffix is { Length: > 0 }) return Get(word.ToString());
         if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(word, out var entry)) return null;
-        if (NeedsTwice(word.ToString(), entry)) return null;
+        if (entry.Chinese || NeedsTwice(word.ToString(), entry)) return null;
         return entry.English;
+    }
+
+    /// <summary>覚えている語なら中国語か (true) / ほかの言語か (false)。覚えていなければ null。word は小文字の英字。</summary>
+    public bool? GetChinese(string word)
+    {
+        if (ContextSuffix is { Length: > 0 } suffix && _entries.TryGetValue(word + suffix, out var contextual))
+            return contextual.Chinese;
+        return _entries.TryGetValue(word, out var entry) ? entry.Chinese : null;
     }
 
     /// <summary>
@@ -106,15 +118,24 @@ public sealed class LanguageMemory
     {
         word = word.ToLowerInvariant();
         if (word.Length < 2 || !word.All(char.IsAsciiLetterLower)) return;
-        lock (_gate) RememberLocked(word, english, explicitChoice);
+        lock (_gate) RememberLocked(word, english, explicitChoice, chinese: false);
         _saver.Request();
     }
 
-    private void RememberLocked(string word, bool english, bool explicitChoice)
+    /// <summary>ユーザーが変換候補から中国語を選んだ語を覚える。</summary>
+    public void RememberChinese(string word)
+    {
+        word = word.ToLowerInvariant();
+        if (word.Length < 2 || !word.All(char.IsAsciiLetterLower)) return;
+        lock (_gate) RememberLocked(word, english: false, explicitChoice: true, chinese: true);
+        _saver.Request();
+    }
+
+    private void RememberLocked(string word, bool english, bool explicitChoice, bool chinese)
     {
         Version++;
         var entryKey = word + ContextSuffix;
-        if (_entries.TryGetValue(entryKey, out var old) && old.English == english)
+        if (_entries.TryGetValue(entryKey, out var old) && old.English == english && old.Chinese == chinese)
         {
             old.Used = DateTime.UtcNow;
             var waiting = NeedsTwice(word, old);
@@ -124,11 +145,12 @@ public sealed class LanguageMemory
         }
         else
         {
-            var entry = new Entry { English = english, Used = DateTime.UtcNow, Count = 1, Explicit = explicitChoice };
+            var entry = new Entry { English = english, Chinese = chinese, Used = DateTime.UtcNow, Count = 1, Explicit = explicitChoice };
             _entries[entryKey] = entry;
+            var language = chinese ? "中国語" : english ? "英語" : "日本語";
             Diagnostics.Log.Decision(NeedsTwice(word, entry)
                 ? $"{Diagnostics.Log.Text(word)}はローマ字としても読めるので、もう一度英字にして確定したら英語にします (学習)。"
-                : $"{Diagnostics.Log.Text(word)}は次から{(english ? "英語" : "日本語")}にします (学習)。");
+                : $"{Diagnostics.Log.Text(word)}は次から{language}にします (学習)。");
         }
         if (_entries.Count > MaxEntries)
         {
@@ -143,7 +165,10 @@ public sealed class LanguageMemory
     public IReadOnlyList<Learned> Entries() =>
         _entries.OrderByDescending(e => e.Value.Used)
             .Select(e => new Learned(WithoutContext(e.Key), e.Value.English, Math.Max(1, e.Value.Count), e.Value.Used, !NeedsTwice(e.Key, e.Value), e.Key,
-                e.Key.EndsWith("@e", StringComparison.Ordinal) ? "英語の後" : e.Key.EndsWith("@j", StringComparison.Ordinal) ? "日本語の後" : null))
+                e.Key.EndsWith("@e", StringComparison.Ordinal) ? "英語の後" : e.Key.EndsWith("@j", StringComparison.Ordinal) ? "日本語の後" : null)
+            {
+                Chinese = e.Value.Chinese,
+            })
             .ToList();
 
     /// <summary>文脈ごとに分けて覚えた語の印 (@e / @j) を外した、語そのもの。</summary>
@@ -196,7 +221,7 @@ public sealed class LanguageMemory
         }
         catch (Exception ex)
         {
-            Diagnostics.Log.Warn($"英語 / 日本語の学習データを保存できませんでした: {ex.Message}");
+            Diagnostics.Log.Warn($"英語 / 日本語 / 中国語の学習データを保存できませんでした: {ex.Message}");
             return false;
         }
     }

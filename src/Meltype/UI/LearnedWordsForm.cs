@@ -9,7 +9,7 @@ namespace Meltype.UI;
 /// <summary>
 /// 学習した語の一覧 (トレイの「学習した語...」)。間違えて覚えた語 (go を英語として覚えて にほんgo になる など) を、
 /// 学習データ全体をリセットせずに 1 語ずつ忘れさせる。
-///   英語 / 日本語: 英字で打った語を英語・日本語のどちらで出すか (LanguageMemory)
+///   英語 / 日本語 / 中国語: 英字で打った語を英語・日本語・中国語のどれで出すか (LanguageMemory)
 ///   変換: 読みに対して選び直した変換 (ConversionHistory: はし → 箸)
 /// </summary>
 internal sealed class LearnedWordsForm : Form
@@ -40,7 +40,7 @@ internal sealed class LearnedWordsForm : Form
         _conversionGrid.Columns.Add("text", "選んだ語");
         _conversionGrid.Columns.Add("used", "最後に使った日");
 
-        var languagePage = new TabPage("英語 / 日本語");
+        var languagePage = new TabPage("英語 / 日本語 / 中国語");
         languagePage.Controls.Add(_languageGrid);
         languagePage.Controls.Add(new Label
         {
@@ -48,7 +48,7 @@ internal sealed class LearnedWordsForm : Form
             AutoSize = true,
             Padding = new Padding(6),
             ForeColor = SystemColors.GrayText,
-            Text = "英字で打った語を、自動の判定ではなく覚えた方 (英語 / 日本語) で出します。間違えて覚えた語は、選んで「忘れる」を押してください。",
+            Text = "英字で打った語を、自動の判定ではなく覚えた方 (英語 / 日本語 / 中国語) で出します。間違えて覚えた語は、選んで「忘れる」を押してください。",
             MaximumSize = new Size(580, 0),
         });
         var conversionPage = new TabPage("変換");
@@ -91,7 +91,7 @@ internal sealed class LearnedWordsForm : Form
         _languageGrid.Rows.Clear();
         foreach (var entry in _languages.Entries().Where(e => filter.Length == 0 || e.Word.Contains(filter, StringComparison.OrdinalIgnoreCase)))
         {
-            var row = _languageGrid.Rows.Add(entry.Word, (entry.English ? "英語 (英字のまま)" : "日本語 (かな)") + (entry.Context is { } context ? $"・{context}" : ""), entry.Count,
+            var row = _languageGrid.Rows.Add(entry.Word, (entry.Chinese ? "中国語 (漢字)" : entry.English ? "英語 (英字のまま)" : "日本語 (かな)") + (entry.Context is { } context ? $"・{context}" : ""), entry.Count,
                 entry.Active ? "有効" : "もう一度で覚える", entry.Used.ToLocalTime().ToString("yyyy/MM/dd", CultureInfo.InvariantCulture));
             _languageGrid.Rows[row].Tag = entry.EntryKey;
         }
@@ -101,7 +101,7 @@ internal sealed class LearnedWordsForm : Form
             var row = _conversionGrid.Rows.Add(reading, text, used.ToLocalTime().ToString("yyyy/MM/dd", CultureInfo.InvariantCulture));
             _conversionGrid.Rows[row].Tag = reading;
         }
-        _tabs.TabPages[0].Text = $"英語 / 日本語 ({_languageGrid.Rows.Count})";
+        _tabs.TabPages[0].Text = $"英語 / 日本語 / 中国語 ({_languageGrid.Rows.Count})";
         _tabs.TabPages[1].Text = $"変換 ({_conversionGrid.Rows.Count})";
     }
 

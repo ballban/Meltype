@@ -318,8 +318,8 @@ public sealed class Settings
      Description("ね・さ などの 1 文字のかなの後ろの w を、英単語 (new・saw) にせず笑いの w にします (なるほどnew → なるほどねw)。英単語の new や saw を打つ人は OFF のままにしてください。")]
     public bool LaughterAfterKana { get; set; }
 
-    [Category("1. 全般"), DisplayName("英語 / 日本語の学習を前の文脈ごとに分ける"),
-     Description("英字 / かなに直した語 (new → ねw など) の学習を、直前が英語だったか日本語だったかごとに別々に覚えます。同じローマ字でも、英語の文の中と日本語の文の中で使い分けられます。ON にする前に覚えた学習は、どちらの文脈でも使います。")]
+    [Category("1. 全般"), DisplayName("英語 / 日本語 / 中国語の学習を前の文脈ごとに分ける"),
+     Description("英字 / かなに直した語 (new → ねw など) の学習を、直前が英語だったか日本語だったかごとに別々に覚えます。同じローマ字でも、英語の文の中と日本語・中国語の文の中で使い分けられます。ON にする前に覚えた学習は、どの文脈でも使います。")]
     public bool ContextualLearning { get; set; }
 
     [Category("1. 全般"), DisplayName("スペースを全角で入力 (Shift + Space で半角)"),
@@ -414,6 +414,10 @@ public sealed class Settings
     [Category("1. 全般"), DisplayName("英字を主に入力 (変換キー / ↓ で日本語に)"),
      Description("自動判定をせず、打った英字をそのまま入力中にします (Space は空白、Enter は英字のまま確定)。日本語にしたい語は、変換キーか ↓ を押すと、ローマ字として読んで変換します。コマンドを多く打つ使い方向けで、Microsoft IME の「主に英語を入力する」と同じ動きです。")]
     public bool EnglishFirstInput { get; set; }
+
+    [Category("1. 全般"), DisplayName("入力中は英字のまま表示し、候補を常に出す"),
+     Description("打っている間は英字のまま見せ、Space を押さなくても入力全体の候補を変換ボックスに出します (最初の候補は自動判定の結果。Rime が使えるときは中国語候補も出ます)。Space: 選んでいる候補で確定 (英語なら後ろに空白)。Enter: 打った英字のまま確定。Tab / ↓: 次の候補、Shift + Tab / ↑: 前の候補。変換キー・Shift + Space: 文節ごとに変換。数字キーは数字の入力です。選んだ英語・日本語・中国語は次からその言語を優先します。")]
+    public bool CandidateFirstInput { get; set; }
 
     [Category("1. 全般"), DisplayName("子音の略入力を候補に出す"),
      Description("子音だけの略入力 (ast → 明日、ngt → ノート など) を、変換の候補に出します。候補は同梱の candidates.txt の英字の読みから出します。既定は OFF です。")]

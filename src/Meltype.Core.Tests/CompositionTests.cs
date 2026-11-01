@@ -202,6 +202,7 @@ internal static class CompositionTests
         public bool Learning { get; set; } = true;
         public bool SeparateKeyRoles { get; set; }
         public bool EnglishFirstInput { get; set; }
+        public bool CandidateFirstInput { get; set; }
         public bool ConsonantAbbreviations { get; set; }
 
         /// <summary>句読点の組み合わせ (設定)。</summary>
@@ -310,6 +311,7 @@ internal static class CompositionTests
                 Learning = () => Learning,
                 SeparateKeyRoles = () => SeparateKeyRoles,
                 EnglishFirstInput = () => EnglishFirstInput,
+                CandidateFirstInput = () => CandidateFirstInput,
                 ConsonantAbbreviations = () => ConsonantAbbreviations,
                 Chinese = chinese,
             });
@@ -488,6 +490,130 @@ internal static class CompositionTests
         var off = new Keyboard();
         off.Type("kyou");
         Assert.Equal("きょう", off.Showing, "OFF は自動判定");
+    }
+
+    [Test]
+    public static void CandidateFirstInput_ShowsLettersWithCandidates()
+    {
+        // The letters show as typed and the candidates are listed without Space, the automatic result first
+        var k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kyouha");
+        Assert.Equal("kyouha", k.Showing, "the letters as typed");
+        var candidates = k.Host.View!.Predictions ?? [];
+        Assert.Equal("今日は", candidates.FirstOrDefault(), "the conversion first: " + string.Join(",", candidates));
+        Assert.True(candidates.Contains("kyouha"), "the letters are a candidate: " + string.Join(",", candidates));
+        Assert.True(!k.Host.View.Converting, "not converting");
+        k.Type(" ");
+        Assert.Equal("今日は", k.Host.Document, "Space commits the first candidate");
+
+        k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kyouha\n");
+        Assert.Equal("kyouha", k.Host.Document, "Enter commits the letters");
+
+        k = new Keyboard { CandidateFirstInput = true };
+        k.Type("hello ");
+        Assert.Equal("hello ", k.Host.Document, "English commits with a space, as Space does without the setting");
+
+        // A short word converts the way Space converts it
+        k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kawa ");
+        Assert.Equal("川", k.Host.Document);
+
+        // Digits are typed, not used to pick a candidate
+        k = new Keyboard { CandidateFirstInput = true };
+        k.Type("hello2");
+        Assert.Equal("hello2", k.Showing);
+        Assert.Equal("", k.Host.Document);
+    }
+
+    [Test]
+    public static void CandidateFirstInput_TabAndArrowsChooseTheCandidate()
+    {
+        foreach (var (next, previous) in new[] { (VirtualKeys.Tab, -1), (VirtualKeys.Down, VirtualKeys.Up) })
+        {
+            var k = new Keyboard { CandidateFirstInput = true };
+            k.Type("kyouha");
+            var candidates = k.Host.View!.Predictions!.ToList();
+            k.Press(next);
+            Assert.Equal(1, k.Host.View!.SelectedPrediction, "the next candidate");
+            k.Press(next);
+            if (previous < 0) ShiftTab(k);
+            else k.Press(previous);
+            Assert.Equal(1, k.Host.View!.SelectedPrediction, "back to the one before");
+            k.Type(" ");
+            Assert.Equal(candidates[1], k.Host.Document, "Space commits the chosen candidate");
+        }
+
+        // Going back from the first wraps to the last
+        var j = new Keyboard { CandidateFirstInput = true };
+        j.Type("kyouha");
+        var count = j.Host.View!.Predictions!.Count;
+        j.Press(VirtualKeys.Up);
+        Assert.Equal(count - 1, j.Host.View!.SelectedPrediction);
+
+        // Clicking a candidate (the Meltype IME window) commits it
+        j = new Keyboard { CandidateFirstInput = true };
+        j.Type("kyouha");
+        var clicked = j.Host.View!.Predictions![1];
+        j.Controller.CommitPredictionAt(1);
+        Assert.Equal(clicked, j.Host.Document);
+    }
+
+    [Test]
+    public static void CandidateFirstInput_ChoosingTheLettersTeachesEnglish()
+    {
+        // Choosing the letters of a word read as Japanese commits them with a space and keeps them English next time
+        var languages = new LanguageMemory(null);
+        var k = new Keyboard(languages: languages) { CandidateFirstInput = true };
+        k.Type("kyouha");
+        var index = k.Host.View!.Predictions!.ToList().IndexOf("kyouha");
+        Assert.True(index > 0, "the letters are listed after the conversion");
+        for (var i = 0; i < index; i++) k.Press(VirtualKeys.Down);
+        k.Type(" ");
+        Assert.Equal("kyouha ", k.Host.Document);
+        Assert.True(languages.Entries().Any(e => e.Word == "kyouha" && e.English), "remembered as English, as choosing the letters in the conversion does");
+
+        // Enter commits what was typed without saying which language it was
+        languages = new LanguageMemory(null);
+        k = new Keyboard(languages: languages) { CandidateFirstInput = true };
+        k.Type("kyouha\n");
+        Assert.Equal(0, languages.Entries().Count, "Enter teaches nothing");
+    }
+
+    [Test]
+    public static void CandidateFirstInput_KeysThatLeaveTheList()
+    {
+        // F6〜F10 show what they choose, as without the setting
+        var k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kyouha");
+        k.Press(VirtualKeys.F7);
+        Assert.Equal("キョウハ", k.Showing);
+        k.Type("\n");
+        Assert.Equal("キョウハ", k.Host.Document);
+
+        // Shift+Space and the 変換 key convert clause by clause
+        foreach (var shiftSpace in new[] { true, false })
+        {
+            k = new Keyboard { CandidateFirstInput = true };
+            k.Type("kyouha");
+            if (shiftSpace)
+            {
+                k.Host.PhysicalShift = true;
+                k.Key(VirtualKeys.LShift);
+                k.Press(VirtualKeys.Space);
+                k.Key(VirtualKeys.LShift, up: true);
+                k.Host.PhysicalShift = false;
+            }
+            else k.Press(VirtualKeys.Convert);
+            Assert.True(k.Host.View?.Converting == true, "converting");
+            Assert.Equal("", k.Host.Document);
+        }
+
+        k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kyouha");
+        k.Press(VirtualKeys.Escape);
+        Assert.Equal(null, k.Host.View, "Esc clears the input");
+        Assert.Equal("", k.Host.Document);
     }
 
     [Test]

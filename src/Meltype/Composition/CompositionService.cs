@@ -77,6 +77,7 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
             Learning = options.Learning,
             SeparateKeyRoles = options.SeparateKeyRoles,
             EnglishFirstInput = options.EnglishFirstInput,
+            CandidateFirstInput = options.CandidateFirstInput,
             ConsonantAbbreviations = options.ConsonantAbbreviations,
             Meanings = options.Meanings ?? MeaningDictionary.Load(),
             RomajiTypos = options.RomajiTypos ?? RomajiTypoCorrector.Load(detector.Romaji),

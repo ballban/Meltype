@@ -108,6 +108,8 @@ public sealed partial class CompositionDetector
     private const double ChineseCommonSyllableCost = 1.2;
     private const double ChineseStandardSyllableCost = 2.2;
     private const double ChineseRareSyllableCost = 4;
+    // A word the user explicitly chose as Chinese. This overrides the conservative no-context penalty.
+    private const double ChineseLearnedWordCost = 0.1;
     // The start of a syllable still being typed at the end of the input (nihao|zh)
     private const double ChinesePartialCost = 1;
     // Starting Chinese without Chinese before the caret. Pinyin that also reads as a Japanese word (nani・danshi = 1) or is an English word
@@ -270,7 +272,10 @@ public sealed partial class CompositionDetector
             }
             else if (edge.Chinese)
             {
-                step = cost + (state.Side == Side.Chinese ? 0 : ChineseStartCost + (edge.Syllable ? ChineseSyllableStartCost : 0))
+                // An explicit Chinese choice must win even when the word is ambiguous without Chinese context.
+                var learnedChinese = Memory?.GetChinese(edge.Kana.ToLowerInvariant()) == true;
+                var startCost = learnedChinese || state.Side == Side.Chinese ? 0 : ChineseStartCost + (edge.Syllable ? ChineseSyllableStartCost : 0);
+                step = cost + startCost
                     + (state.Side == Side.Japanese && inLetters ? ChineseJapaneseSplitCost : 0);
                 next = new LatticeState(Side.Chinese, false, state.AllEnglish, false);
             }
@@ -662,6 +667,7 @@ public sealed partial class CompositionDetector
     /// <summary>
     /// Chinese (pinyin) edges starting at start: a listed word (nihao) or one syllable (hao) of lowercase letters, and at the end of the input
     /// the start of a syllable still being typed (zh). A word the user taught as English or Japanese (F10・F6) stays that language.
+    /// A word explicitly chosen as Chinese may be a complete Rime word not present in the detection dictionary.
     /// </summary>
     private List<(LatticeEdge Edge, double Cost)> ChineseEdges(string text, int start)
     {
@@ -670,7 +676,8 @@ public sealed partial class CompositionDetector
         for (var end = start + 1; end <= length && end - start <= MaxSpan && char.IsAsciiLetterLower(text[end - 1]); end++)
         {
             var span = text[start..end];
-            var cost = Detection.Pinyin.Word(span) switch
+            var learnedChinese = Memory?.GetChinese(span) == true;
+            var cost = learnedChinese ? ChineseLearnedWordCost : Detection.Pinyin.Word(span) switch
             {
                 Detection.SyllableTier.Common => ChineseCommonWordCost,
                 Detection.SyllableTier.Standard => ChineseStandardWordCost,
