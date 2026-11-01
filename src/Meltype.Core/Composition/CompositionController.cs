@@ -1875,10 +1875,10 @@ public sealed class CompositionController
         return new Clause(typedRaw, true, candidates) { Raw = typedRaw, Kana = reading };
     }
 
-    /// <summary>Candidate-first input applies: letters typed for the automatic detection, with nothing converting, protected, or set by F6〜F10.</summary>
+    /// <summary>Candidate-first input applies to letters and punctuation/symbols, with nothing converting, protected, or set by F6〜F10.</summary>
     private bool CandidateFirst() =>
         _options.CandidateFirstInput() && !_converting && _reconversion is null && _text.Mode == DisplayMode.Auto && !_text.KanaInput &&
-        !_text.IsEmpty && _text.Raw.Any(char.IsAsciiLetter) && _text.ProtectedSpans().Count == 0;
+        !_text.IsEmpty && _text.Raw.Any(c => char.IsAsciiLetter(c) || char.IsPunctuation(c) || char.IsSymbol(c)) && _text.ProtectedSpans().Count == 0;
 
     /// <summary>
     /// Candidate-first input: the whole-input candidates, built lazily so keys handled in one batch act on the input they follow.
@@ -3043,7 +3043,7 @@ public sealed class CompositionController
     }
 
     /// <summary>今の表示 (ライブ変換が有効なら日本語区間は漢字に変換済み)。</summary>
-    /// <remarks>Candidate-first input shows the typed letters itself; this is then the first candidate, converted the way Space converts even when short (kawa → 川).</remarks>
+    /// <remarks>Candidate-first input shows the typed input itself; this is then the first candidate, converted the way Space converts even when short (kawa → 川).</remarks>
     private string CurrentDisplay(bool final) => CandidateFirst()
         ? _text.Display(final, kana => string.Concat(LiveClauses(kana).Select(c => c.Text)), LiveChinese)
         : _text.Display(final, _options.LiveConversion() ? LiveConvert : null, _options.LiveConversion() ? LiveChinese : null);
@@ -3065,7 +3065,7 @@ public sealed class CompositionController
             CommitProtected(suffix);
             return;
         }
-        // Candidate-first input shows the typed letters, so committing without choosing a candidate (Enter, focus moving away) commits them
+        // Candidate-first input shows the typed input, so committing without choosing a candidate (Enter, focus moving away) commits it
         if (!automatic && CandidateFirst())
         {
             CommitText(_text.Raw + suffix, english: true, _text.Raw, chosen: true, preserveText);
@@ -3103,7 +3103,7 @@ public sealed class CompositionController
     private string ShownCommitText(bool fixEnglish)
     {
         var text = CurrentDisplay(final: true);
-        // Candidate-first input shows the letters, not this: the tweaks to keep what was shown do not apply
+        // Candidate-first input shows the input, not this: the tweaks to keep what was shown do not apply
         var shownInput = !CandidateFirst();
         // 英語の文脈で英字だけに見えていた入力 (hello mata) は、確定するときに判定し直してかなにしない: 見えているとおりに確定する (issue #127)。
         // 文脈がない単独の語 (mine → みね) は、今までどおり確定時の判定に任せる
@@ -3568,7 +3568,7 @@ public sealed class CompositionController
         }
         else if (CurrentFirst() is { } first)
         {
-            // Candidate-first input: the letters as typed, and the candidates where predictions go (the IME window draws those while typing)
+            // Candidate-first input: the input as typed, and the candidates where predictions go (the IME window draws those while typing)
             var texts = first.Texts();
             var suggestion = _text.Suggestion();
             var contextHint = suggestion is null ? null : $"Tab → {suggestion} (英字に)";

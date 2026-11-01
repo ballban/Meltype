@@ -527,6 +527,21 @@ internal static class CompositionTests
     }
 
     [Test]
+    public static void CandidateFirstInput_ShowsPunctuationWithCandidates()
+    {
+        foreach (var punctuation in new[] { ",", ".", "[" })
+        {
+            var k = new Keyboard { CandidateFirstInput = true };
+            k.Type(punctuation);
+            Assert.Equal(punctuation, k.Showing, "the punctuation stays visible while candidates are shown");
+            var view = k.Host.View!;
+            var candidates = view.Predictions ?? [];
+            Assert.True(candidates.Count > 0, "punctuation candidates are shown immediately: " + string.Join(",", candidates));
+            Assert.True(!view.Converting, "punctuation is still in candidate-first mode");
+        }
+    }
+
+    [Test]
     public static void CandidateFirstInput_TabAndArrowsChooseTheCandidate()
     {
         foreach (var (next, previous) in new[] { (VirtualKeys.Tab, -1), (VirtualKeys.Down, VirtualKeys.Up) })
