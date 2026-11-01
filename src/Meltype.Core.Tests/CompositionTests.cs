@@ -519,11 +519,23 @@ internal static class CompositionTests
         k.Type("kawa ");
         Assert.Equal("川", k.Host.Document);
 
-        // Digits are typed, not used to pick a candidate
-        k = new Keyboard { CandidateFirstInput = true };
-        k.Type("hello2");
-        Assert.Equal("hello2", k.Showing);
-        Assert.Equal("", k.Host.Document);
+    }
+
+    [Test]
+    public static void CandidateFirstInput_NumberKeysChooseCandidates()
+    {
+        var k = new Keyboard { CandidateFirstInput = true };
+        k.Type("kyouha");
+        var candidates = k.Host.View!.Predictions!.ToList();
+        Assert.True(candidates.Count >= 2, "at least two candidates are needed: " + string.Join(",", candidates));
+        k.Press('2');
+        Assert.Equal(candidates[1], k.Host.Document, "2 selects and commits the second candidate");
+        Assert.True(!k.Gate.IsCaptured, "number selection commits the candidate");
+
+        k = new Keyboard { CandidateFirstInput = true, NumberKeysSelectCandidates = false };
+        k.Type("kyouha");
+        k.Press('1');
+        Assert.Equal("kyouha1", k.Showing, "the top-row digit is typed when number selection is disabled");
     }
 
     [Test]

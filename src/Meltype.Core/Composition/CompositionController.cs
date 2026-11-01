@@ -947,6 +947,11 @@ public sealed class CompositionController
             case VirtualKeys.Down or VirtualKeys.Up when CandidateFirst() && CurrentFirst() is { Count: > 1 }:
                 MoveFirst(vk == VirtualKeys.Up ? -1 : 1);
                 return;
+            case >= 0x31 and <= 0x39 when CandidateFirst() && _swallowedShift.Count == 0 && !_host.IsShiftDown() && _options.NumberKeysSelectCandidates() &&
+                                               SelectFirstByNumber(vk - 0x31):
+            case >= 0x61 and <= 0x69 when CandidateFirst() && _swallowedShift.Count == 0 && !_host.IsShiftDown() &&
+                                               SelectFirstByNumber(vk - 0x61):
+                return;
             case VirtualKeys.Tab when CurrentPredictions().Count > 0:
                 // 予測変換の候補を選ぶ (Tab で次、Shift+Tab で前。最後の次は選ばない状態に戻る)。
                 var step = _swallowedShift.Count > 0 ? -1 : 1;
@@ -1988,6 +1993,14 @@ public sealed class CompositionController
     {
         if (CurrentFirst() is not { Count: > 0 } first) return;
         _firstIndex = (_firstIndex + step + first.Count) % first.Count;
+    }
+
+    /// <summary>Candidate-first input: a number selects and commits the corresponding candidate, if it exists.</summary>
+    private bool SelectFirstByNumber(int row)
+    {
+        if (CurrentFirst() is not { } first || row >= first.Count) return false;
+        CommitFirst(row, space: false);
+        return true;
     }
 
     /// <summary>
@@ -3572,7 +3585,7 @@ public sealed class CompositionController
             var texts = first.Texts();
             var suggestion = _text.Suggestion();
             var contextHint = suggestion is null ? null : $"Tab → {suggestion} (英字に)";
-            var hint = "Space 確定　Enter 英字のまま　Tab/↓ 次の候補　変換 文節ごとに変換";
+            var hint = "Space 確定　Enter 英字のまま　1〜9 候補を選択　Tab/↓ 次の候補　変換 文節ごとに変換";
             if (contextHint is not null) hint = contextHint + "　" + hint;
             _host.Show(new CompositionView(_text.Raw, texts, _firstIndex, false, hint, Suggestion: MisspellingSuggestion(),
                 Predictions: texts, SelectedPrediction: _firstIndex, Typed: TypedKeys(), Committed: _text.Raw, ContextHint: contextHint));

@@ -247,7 +247,7 @@ public sealed class Settings
      Description("確定するときに、日本語と半角数字の間に半角スペースを入れます (この処理を3回実行します → この処理を 3 回実行します)。技術文書などの表記に合わせるとき用です。全角数字 (３回) には入れません。")]
     public bool SpaceAroundNumbers { get; set; }
     [Category("1. 全般"), DisplayName("変換中の数字キーで候補を選ぶ"),
-     Description("Space・Tab で変換している間に、キーボードの上の段の 1〜9 を押すと、候補の一覧の番号で選びます。OFF にすると、今の候補で確定してから数字を入力します (zu Space 1 → 図1、hyou Space 10 → 表10)。テンキーの 1〜9 は、この設定に関係なく候補を選びます。")]
+     Description("Space・Tab で変換している間、または「入力中は英字のまま表示し、候補を常に出す」が ON のときに、キーボードの上の段の 1〜9 を押すと候補の番号で選びます。OFF にすると、通常の変換では今の候補で確定してから数字を入力し、候補常表示では数字をそのまま入力します (zu Space 1 → 図1、hyou Space 10 → 表10)。テンキーの 1〜9 は、この設定に関係なく候補を選びます。")]
     public bool NumberKeysSelectCandidates { get; set; } = true;
 
     [Category("1. 全般"), DisplayName("Shift + Space で半角スペース"),
@@ -416,7 +416,7 @@ public sealed class Settings
     public bool EnglishFirstInput { get; set; }
 
     [Category("1. 全般"), DisplayName("入力中は英字のまま表示し、候補を常に出す"),
-     Description("打っている間は英字や記号を打ったまま見せ、Space を押さなくても入力全体の候補を変換ボックスに出します (句読点・括弧などの記号を単独で打ったときも候補を出します。最初の候補は自動判定の結果。Rime が使えるときは中国語候補も出ます)。Space: 選んでいる候補で確定 (英語なら後ろに空白)。Enter: 打った英字や記号のまま確定。Tab / ↓: 次の候補、Shift + Tab / ↑: 前の候補。変換キー・Shift + Space: 文節ごとに変換。数字キーは数字の入力です。選んだ英語・日本語・中国語は次からその言語を優先します。")]
+     Description("打っている間は英字や記号を打ったまま見せ、Space を押さなくても入力全体の候補を変換ボックスに出します (句読点・括弧などの記号を単独で打ったときも候補を出します。最初の候補は自動判定の結果。Rime が使えるときは中国語候補も出ます)。Space: 選んでいる候補で確定 (英語なら後ろに空白)。Enter: 打った英字や記号のまま確定。1〜9: 候補の番号で選択。Tab / ↓: 次の候補、Shift + Tab / ↑: 前の候補。変換キー・Shift + Space: 文節ごとに変換。選んだ英語・日本語・中国語は次からその言語を優先します。")]
     public bool CandidateFirstInput { get; set; }
 
     [Category("1. 全般"), DisplayName("子音の略入力を候補に出す"),
