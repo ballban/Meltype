@@ -37,7 +37,8 @@ public sealed record CompositionView(
     int SelectedPrediction = -1,
     string? Typed = null,
     string? Committed = null,
-    string? ContextHint = null);
+    string? ContextHint = null,
+    bool NumberedPredictions = false);
 
 /// <summary>CompositionController が外界とやり取りする口。テストでは偽物に差し替える。</summary>
 public interface ICompositionHost
@@ -3588,7 +3589,8 @@ public sealed class CompositionController
             var hint = "Space 確定　Enter 英字のまま　1〜9 候補を選択　Tab/↓ 次の候補　変換 文節ごとに変換";
             if (contextHint is not null) hint = contextHint + "　" + hint;
             _host.Show(new CompositionView(_text.Raw, texts, _firstIndex, false, hint, Suggestion: MisspellingSuggestion(),
-                Predictions: texts, SelectedPrediction: _firstIndex, Typed: TypedKeys(), Committed: _text.Raw, ContextHint: contextHint));
+                Predictions: texts, SelectedPrediction: _firstIndex, Typed: TypedKeys(), Committed: _text.Raw, ContextHint: contextHint,
+                NumberedPredictions: true));
         }
         else
         {

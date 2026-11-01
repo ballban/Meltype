@@ -312,8 +312,12 @@ internal sealed class CompositionWindow : PopupForm
         }
         else if (view.Predictions is { Count: > 0 } predictions)
         {
-            // 予測変換の候補 (番号は付けない。Tab で選ぶ)
-            foreach (var prediction in predictions) width = Math.Max(width, TextRenderer.MeasureText(g, $"▸ {prediction}", _candidateFont).Width + 28);
+            // 候補常表示では番号で選べるため番号を付け、通常の予測候補は Tab で選ぶため矢印を付ける。
+            for (var i = 0; i < predictions.Count; i++)
+            {
+                var label = view.NumberedPredictions ? $"{i + 1}  {predictions[i]}" : $"▸ {predictions[i]}";
+                width = Math.Max(width, TextRenderer.MeasureText(g, label, _candidateFont).Width + 28);
+            }
             height += predictions.Count * (_candidateFont.Height + 4) + 6;
         }
         width = Math.Max(width, TextRenderer.MeasureText(g, view.Hint, _hintFont).Width + 16);
@@ -429,7 +433,8 @@ internal sealed class CompositionWindow : PopupForm
                     using var highlight = new SolidBrush(Color.FromArgb(60, Accent));
                     g.FillRectangle(highlight, 4, y - 2, Width - 8, rowHeight);
                 }
-                DrawText(g, $"{(selected ? "▸" : "  ")} {predictions[i]}", _candidateFont, new Point(12, y),
+                var label = view.NumberedPredictions ? $"{i + 1}  {predictions[i]}" : $"{(selected ? "▸" : "  ")} {predictions[i]}";
+                DrawText(g, label, _candidateFont, new Point(12, y),
                     selected ? _palette.Text : _palette.Candidate,
                     selected ? Blend(Background, Color.FromArgb(60, Accent)) : Background, TextFormatFlags.NoPrefix);
                 y += rowHeight;

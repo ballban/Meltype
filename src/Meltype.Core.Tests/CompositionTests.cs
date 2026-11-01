@@ -526,6 +526,7 @@ internal static class CompositionTests
     {
         var k = new Keyboard { CandidateFirstInput = true };
         k.Type("kyouha");
+        Assert.True(k.Host.View!.NumberedPredictions, "candidate-first candidates show selection numbers");
         var candidates = k.Host.View!.Predictions!.ToList();
         Assert.True(candidates.Count >= 2, "at least two candidates are needed: " + string.Join(",", candidates));
         k.Press('2');
